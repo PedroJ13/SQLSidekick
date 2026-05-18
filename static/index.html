@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SQLSidekick</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <section class="page page-connection" id="connectionPage">
+      <header class="connection-head">
+        <div>
+          <p class="eyebrow">SQL Server documentation</p>
+          <h1>SQLSidekick</h1>
+          <p class="lead">Connect to a SQL Server database and start building technical inventory without installing anything on the server.</p>
+        </div>
+        <div class="connection-state" id="connectionStatus">Disconnected</div>
+      </header>
+
+      <main class="connection-shell">
+        <section class="connection-card">
+          <div class="section-title">
+            <h2>Connection</h2>
+            <p>Credentials are only used to open the local connection from this app.</p>
+          </div>
+
+          <form id="connectionForm" autocomplete="off">
+            <label>
+              Server
+              <input id="server" name="server" placeholder="localhost,1433 or server.database.windows.net" required />
+            </label>
+            <label>
+              Database
+              <input id="database" name="database" placeholder="MyDatabase" required />
+            </label>
+            <label>
+              Authentication
+              <select id="authType" name="authType">
+                <option value="sql">SQL Login</option>
+                <option value="windows">Windows Integrated</option>
+              </select>
+            </label>
+            <div class="credentials-grid">
+              <label class="sql-auth">
+                User
+                <input id="username" name="username" placeholder="usuario_sql" />
+              </label>
+              <label class="sql-auth">
+                Password
+                <input id="password" name="password" type="password" />
+              </label>
+            </div>
+            <div class="checks">
+              <label>
+                <input id="encrypt" name="encrypt" type="checkbox" checked />
+                Encrypt
+              </label>
+              <label>
+                <input id="trustServerCertificate" name="trustServerCertificate" type="checkbox" checked />
+                Trust cert
+              </label>
+            </div>
+            <button class="primary-action" type="submit" id="connectButton">Test and enter</button>
+          </form>
+
+          <div id="connectionMessage" class="message hidden"></div>
+        </section>
+      </main>
+    </section>
+
+    <section class="page page-app hidden" id="appPage">
+      <header class="app-topbar">
+        <div class="brand-block">
+          <button class="icon-button" id="toggleSidebar" title="Collapse menu">Menu</button>
+          <div>
+            <h1>SQLSidekick</h1>
+            <div class="connection-meta" id="connectionMeta">
+              <span>Server: <strong id="serverLabel">-</strong></span>
+              <span>Database: <strong id="databaseLabel">-</strong></span>
+              <span>User: <strong id="userLabel">-</strong></span>
+            </div>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="connection-pill" id="appConnectionStatus">Connected</div>
+          <button id="changeConnection">Change connection</button>
+        </div>
+      </header>
+
+      <main class="app-layout" id="appLayout">
+        <aside class="object-sidebar" id="objectSidebar">
+          <div class="sidebar-head">
+            <div>
+              <p class="eyebrow">Explorer</p>
+              <h2>Objects</h2>
+            </div>
+            <button class="icon-button" id="refreshQueries" title="Reload queries">R</button>
+          </div>
+          <nav id="queryList" class="object-menu"></nav>
+        </aside>
+
+        <section class="workspace">
+          <div class="workspace-head">
+            <div>
+              <p class="eyebrow" id="activeGroup">Documentation</p>
+              <h2 id="activeTitle">Choose a section</h2>
+              <p id="activeDescription">Select a group from the left menu to review the discovered characteristics.</p>
+            </div>
+            <div class="actions">
+              <button id="viewSql" disabled>View SQL</button>
+              <button id="runQuery" disabled>Run</button>
+              <button id="exportCsv" disabled>Export CSV</button>
+            </div>
+          </div>
+
+          <div id="message" class="message hidden"></div>
+
+          <div class="summary" id="summary">
+            <div>
+              <span class="metric" id="rowCount">0</span>
+              <span>rows</span>
+            </div>
+            <div>
+              <span class="metric" id="columnCount">0</span>
+              <span>columns</span>
+            </div>
+            <label class="filter">
+              Search
+              <input id="filterText" placeholder="filter results..." />
+            </label>
+          </div>
+
+          <div class="detail-surface">
+            <div id="cardView" class="card-grid hidden"></div>
+            <div class="table-wrap">
+              <table id="resultTable">
+                <thead></thead>
+                <tbody>
+                  <tr>
+                    <td class="empty">No results yet.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </main>
+    </section>
+
+    <dialog id="sqlDialog">
+      <div class="dialog-head">
+        <h2>SQL</h2>
+        <button id="closeSql" title="Close">x</button>
+      </div>
+      <pre id="sqlPreview"></pre>
+    </dialog>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
