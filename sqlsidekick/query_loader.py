@@ -13,6 +13,12 @@ class QueryDefinition:
 
 
 def load_named_queries(path: Path) -> dict[str, QueryDefinition]:
+    if path.is_dir():
+        queries: dict[str, QueryDefinition] = {}
+        for sql_path in sorted(path.glob("*.sql")):
+            queries.update(load_named_queries(sql_path))
+        return queries
+
     queries: dict[str, QueryDefinition] = {}
     current_name: str | None = None
     current_title = ""
@@ -36,7 +42,7 @@ def load_named_queries(path: Path) -> dict[str, QueryDefinition]:
         current_description = ""
         current_sql = []
 
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if line.startswith("-- name:"):
             flush()
@@ -53,4 +59,3 @@ def load_named_queries(path: Path) -> dict[str, QueryDefinition]:
 
     flush()
     return queries
-

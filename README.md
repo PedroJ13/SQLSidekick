@@ -41,7 +41,7 @@ Las credenciales se envian solo al servidor local de la app para abrir la conexi
 
 ## Consultas
 
-Las consultas viven en `sql/documentation.sql`. Cada seccion se marca asi:
+Las consultas viven en archivos separados dentro de `sql/`. Cada seccion se marca asi:
 
 ```sql
 -- name: tables

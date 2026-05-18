@@ -71,7 +71,7 @@
     <section class="page page-app hidden" id="appPage">
       <header class="app-topbar">
         <div class="brand-block">
-          <button class="icon-button" id="toggleSidebar" title="Collapse menu">Menu</button>
+          <button class="icon-button" id="toggleSidebar" title="Collapse menu" aria-label="Collapse menu">☰</button>
           <div>
             <h1>SQLSidekick</h1>
             <div class="connection-meta" id="connectionMeta">
@@ -94,7 +94,7 @@
               <p class="eyebrow">Explorer</p>
               <h2>Objects</h2>
             </div>
-            <button class="icon-button" id="refreshQueries" title="Reload queries">R</button>
+            <button class="icon-button" id="refreshQueries" title="Reload queries" aria-label="Reload queries">↻</button>
           </div>
           <nav id="queryList" class="object-menu"></nav>
         </aside>
@@ -107,9 +107,15 @@
               <p id="activeDescription">Select a group from the left menu to review the discovered characteristics.</p>
             </div>
             <div class="actions">
-              <button id="viewSql" disabled>View SQL</button>
-              <button id="runQuery" disabled>Run</button>
-              <button id="exportCsv" disabled>Export CSV</button>
+              <button class="tool-button" id="viewSql" title="View SQL" aria-label="View SQL" disabled>
+                <span class="icon-search" aria-hidden="true"></span>
+              </button>
+              <button class="tool-button" id="runQuery" title="Refresh query" aria-label="Refresh query" disabled>
+                <span class="icon-refresh" aria-hidden="true">↻</span>
+              </button>
+              <button class="tool-button" id="exportCsv" title="Export CSV" aria-label="Export CSV" disabled>
+                <span class="icon-file-csv" aria-hidden="true"><span>CSV</span></span>
+              </button>
             </div>
           </div>
 

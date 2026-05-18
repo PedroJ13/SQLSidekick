@@ -344,6 +344,22 @@ button:disabled {
   padding: 8px;
 }
 
+.menu-loading {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.menu-loading .loading-spinner {
+  width: 22px;
+  height: 22px;
+  border-width: 2px;
+}
+
 .query-item {
   width: 100%;
   min-height: 50px;
@@ -394,6 +410,95 @@ button:disabled {
 .actions {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.tool-button {
+  width: 52px;
+  min-height: 42px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  font-weight: 700;
+}
+
+.icon-search {
+  width: 22px;
+  height: 22px;
+  display: block;
+  position: relative;
+  border: 3px solid currentColor;
+  border-radius: 50%;
+}
+
+.icon-search::after {
+  content: "";
+  width: 10px;
+  height: 3px;
+  position: absolute;
+  right: -8px;
+  bottom: -4px;
+  background: currentColor;
+  border-radius: 3px;
+  transform: rotate(45deg);
+  transform-origin: center;
+}
+
+.icon-refresh {
+  display: block;
+  color: currentColor;
+  font-size: 25px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.icon-file-csv {
+  width: 25px;
+  height: 30px;
+  display: grid;
+  place-items: end center;
+  position: relative;
+  border: 3px solid currentColor;
+  border-radius: 4px;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.icon-file-csv::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  background: #fff;
+  border-left: 3px solid currentColor;
+  border-bottom: 3px solid currentColor;
+}
+
+.icon-file-csv span {
+  margin-bottom: 4px;
+}
+
+.icon-loading-dot {
+  width: 10px;
+  height: 10px;
+  display: block;
+  background: currentColor;
+  border-radius: 50%;
+  animation: pulse-dot 0.8s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    transform: scale(0.7);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
 }
 
 .message {
@@ -548,6 +653,72 @@ tbody tr:hover {
   height: 160px;
   text-align: center;
   color: var(--muted);
+}
+
+.loading-state {
+  width: min(420px, 100%);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  margin: 0 auto;
+  padding: 18px;
+  text-align: left;
+}
+
+.loading-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid #d9e0e7;
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+}
+
+.loading-state strong {
+  display: block;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.loading-state span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.loading-bar {
+  grid-column: 1 / -1;
+  height: 5px;
+  overflow: hidden;
+  background: #edf3f6;
+  border-radius: 999px;
+}
+
+.loading-bar span {
+  width: 42%;
+  height: 100%;
+  display: block;
+  margin: 0;
+  background: var(--brand);
+  border-radius: inherit;
+  animation: loading-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes loading-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
 }
 
 dialog {

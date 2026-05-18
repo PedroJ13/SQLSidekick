@@ -1,16 +1,43 @@
 const QUERY_GROUPS = [
+  { title: "Server", names: ["server_overview"] },
   {
     title: "Database",
     names: ["database_overview", "database_properties"],
   },
   { title: "Storage", names: ["database_files", "filegroups", "space_usage"] },
   { title: "Structure", names: ["schemas", "objects", "tables", "columns", "indexes", "foreign_keys"] },
+  { title: "Constraints", names: ["key_constraints", "check_constraints", "default_constraints"] },
   { title: "SQL Code", names: ["modules"] },
+  { title: "Security", names: ["database_principals", "database_permissions"] },
+  { title: "Analysis", names: ["review_findings", "index_usage", "index_physical_stats", "missing_indexes", "statistics"] },
+  { title: "Operations", names: ["backup_history", "sql_agent_jobs", "extended_properties"] },
 ];
 
-const CARD_QUERIES = new Set(["database_overview", "database_properties"]);
+const CARD_QUERIES = new Set(["server_overview", "database_overview", "database_properties"]);
 
 const CARD_GROUPS = {
+  server_overview: [
+    {
+      title: "Identity",
+      fields: ["server_name", "machine_name", "instance_name", "host_platform"],
+    },
+    {
+      title: "Version",
+      fields: ["edition", "product_version", "product_level", "engine_edition", "server_collation"],
+    },
+    {
+      title: "Inventory",
+      fields: ["database_count", "server_login_count", "linked_server_count", "sql_agent_job_count"],
+    },
+    {
+      title: "Runtime",
+      fields: ["server_time", "cpu_count"],
+    },
+    {
+      title: "Memory",
+      fields: ["physical_memory_gb", "max_server_memory_gb"],
+    },
+  ],
   database_overview: [
     {
       title: "Identity",
@@ -35,7 +62,6 @@ const CARD_GROUPS = {
         "trigger_count",
         "foreign_key_count",
         "index_count",
-        "sql_agent_job_count",
       ],
     },
     {
@@ -199,6 +225,7 @@ function goToConnection() {
 }
 
 async function loadQueries() {
+  renderQueryMenuLoading();
   const payload = await api("/api/queries");
   state.queries = payload.queries;
   renderQueryMenu();
@@ -249,13 +276,23 @@ function renderQueryMenu() {
     details.className = "menu-group";
     details.open = true;
     const summary = document.createElement("summary");
-    summary.textContent = "Other";
+    summary.textContent = "Additional";
     const items = document.createElement("div");
     items.className = "menu-items";
-    uncategorized.forEach((query) => items.appendChild(createQueryButton(query, "Other")));
+    uncategorized.forEach((query) => items.appendChild(createQueryButton(query, "Additional")));
     details.append(summary, items);
     els.queryList.appendChild(details);
   }
+}
+
+function renderQueryMenuLoading() {
+  if (!els.queryList) return;
+  els.queryList.innerHTML = `
+    <div class="menu-loading">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <span>Refreshing menu</span>
+    </div>
+  `;
 }
 
 function createQueryButton(query, groupTitle) {
@@ -296,7 +333,7 @@ function setActiveQuery(name, groupTitle) {
   els.exportCsv.disabled = true;
   els.cardView.classList.add("hidden");
   els.tableWrap.classList.remove("hidden");
-  renderEmptyTable("Loading section data...");
+  renderLoadingState();
   clearMessage(els.message);
 }
 
@@ -340,8 +377,11 @@ async function testConnection(event) {
 async function runActiveQuery() {
   if (!state.activeQuery || !state.connection) return;
   clearMessage(els.message);
+  els.cardView.classList.add("hidden");
+  els.tableWrap.classList.remove("hidden");
+  renderLoadingState();
   els.runQuery.disabled = true;
-  els.runQuery.textContent = "Running...";
+  els.runQuery.innerHTML = `<span class="icon-loading-dot" aria-hidden="true"></span>`;
   try {
     const payload = await api("/api/run-query", {
       method: "POST",
@@ -359,7 +399,7 @@ async function runActiveQuery() {
     showMessage(els.message, error.message, "error");
   } finally {
     els.runQuery.disabled = !state.connected;
-    els.runQuery.textContent = "Run";
+    els.runQuery.innerHTML = `<span class="icon-refresh" aria-hidden="true">↻</span>`;
   }
 }
 
@@ -430,10 +470,7 @@ function renderCards() {
 
 function getCardGroups() {
   const configured = CARD_GROUPS[state.activeQuery?.name] || [];
-  const configuredFields = new Set(configured.flatMap((group) => group.fields));
-  const remaining = state.columns.filter((column) => !configuredFields.has(column));
-  if (remaining.length === 0) return configured;
-  return [...configured, { title: "Other", fields: remaining }];
+  return configured;
 }
 
 function renderTable() {
@@ -495,6 +532,26 @@ function renderEmptyTable(message) {
   const tbody = els.table.querySelector("tbody");
   thead.innerHTML = "";
   tbody.innerHTML = `<tr><td class="empty">${escapeHtml(message)}</td></tr>`;
+}
+
+function renderLoadingState() {
+  const thead = els.table.querySelector("thead");
+  const tbody = els.table.querySelector("tbody");
+  thead.innerHTML = "";
+  tbody.innerHTML = `
+    <tr>
+      <td class="empty">
+        <div class="loading-state">
+          <div class="loading-spinner" aria-hidden="true"></div>
+          <div>
+            <strong>Loading section data</strong>
+            <span>Running the SQL query and preparing the result view.</span>
+          </div>
+          <div class="loading-bar" aria-hidden="true"><span></span></div>
+        </div>
+      </td>
+    </tr>
+  `;
 }
 
 function exportCsv() {

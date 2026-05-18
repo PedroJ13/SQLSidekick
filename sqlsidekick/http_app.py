@@ -19,48 +19,51 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
     @classmethod
     def configure(cls, root: Path) -> None:
         cls.root = root
-        cls.queries_path = root / "sql" / "documentation.sql"
+        cls.queries_path = root / "sql"
         cls.static_path = root / "static"
 
     def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/":
-            self.serve_file(self.static_path / "index.html")
-            return
-        if parsed.path == "/api/health":
-            self.send_json({"ok": True, "name": "SQLSidekick"})
-            return
-        if parsed.path == "/api/queries":
-            queries = load_named_queries(self.queries_path)
-            self.send_json(
-                {
-                    "queries": [
-                        {
-                            "name": query.name,
-                            "title": query.title,
-                            "description": query.description,
-                        }
-                        for query in queries.values()
-                    ]
-                }
-            )
-            return
-        if parsed.path == "/api/default-connection":
-            self.send_json({"connection": self.load_default_connection()})
-            return
-        if parsed.path == "/api/query-sql":
-            name = parse_qs(parsed.query).get("name", [""])[0]
-            queries = load_named_queries(self.queries_path)
-            if name not in queries:
-                self.send_json({"error": "Consulta no encontrada."}, status=404)
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/":
+                self.serve_file(self.static_path / "index.html")
                 return
-            self.send_json({"name": name, "sql": queries[name].sql})
-            return
-        if parsed.path.startswith("/static/"):
-            relative = parsed.path.removeprefix("/static/")
-            self.serve_file(self.static_path / relative)
-            return
-        self.send_json({"error": "Ruta no encontrada."}, status=404)
+            if parsed.path == "/api/health":
+                self.send_json({"ok": True, "name": "SQLSidekick"})
+                return
+            if parsed.path == "/api/queries":
+                queries = load_named_queries(self.queries_path)
+                self.send_json(
+                    {
+                        "queries": [
+                            {
+                                "name": query.name,
+                                "title": query.title,
+                                "description": query.description,
+                            }
+                            for query in queries.values()
+                        ]
+                    }
+                )
+                return
+            if parsed.path == "/api/default-connection":
+                self.send_json({"connection": self.load_default_connection()})
+                return
+            if parsed.path == "/api/query-sql":
+                name = parse_qs(parsed.query).get("name", [""])[0]
+                queries = load_named_queries(self.queries_path)
+                if name not in queries:
+                    self.send_json({"error": "Consulta no encontrada."}, status=404)
+                    return
+                self.send_json({"name": name, "sql": queries[name].sql})
+                return
+            if parsed.path.startswith("/static/"):
+                relative = parsed.path.removeprefix("/static/")
+                self.serve_file(self.static_path / relative)
+                return
+            self.send_json({"error": "Ruta no encontrada."}, status=404)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": f"Error inesperado: {exc}"}, status=500)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
