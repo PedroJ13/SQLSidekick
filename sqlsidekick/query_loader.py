@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+RESERVED_QUERY_DIRS = {"light", "full", "basic_alerts"}
+
 
 @dataclass(frozen=True)
 class QueryDefinition:
@@ -12,11 +14,12 @@ class QueryDefinition:
     sql: str
 
 
-def load_named_queries(path: Path) -> dict[str, QueryDefinition]:
+def load_named_queries(path: Path, version: str = "full") -> dict[str, QueryDefinition]:
+    version = normalize_version(version)
     if path.is_dir():
         queries: dict[str, QueryDefinition] = {}
-        for sql_path in sorted(path.glob("*.sql")):
-            queries.update(load_named_queries(sql_path))
+        for sql_path in iter_sql_files(path, version):
+            queries.update(load_named_queries(sql_path, version=version))
         return queries
 
     queries: dict[str, QueryDefinition] = {}
@@ -59,3 +62,37 @@ def load_named_queries(path: Path) -> dict[str, QueryDefinition]:
 
     flush()
     return queries
+
+
+def normalize_version(version: str) -> str:
+    normalized = (version or "full").strip().lower()
+    if normalized not in {"light", "full"}:
+        return "full"
+    return normalized
+
+
+def iter_sql_files(path: Path, version: str) -> list[Path]:
+    if has_version_children(path):
+        selected_dirs = [path / "light"]
+        if version == "full":
+            selected_dirs.append(path / "full")
+        files: list[Path] = []
+        for selected_dir in selected_dirs:
+            if selected_dir.is_dir():
+                files.extend(sorted(selected_dir.glob("*.sql")))
+        for child in sorted(path.iterdir()):
+            if child.is_dir() and child.name.lower() not in RESERVED_QUERY_DIRS:
+                files.extend(iter_sql_files(child, version))
+        return files
+
+    files: list[Path] = []
+    for child in sorted(path.iterdir()):
+        if child.is_file() and child.suffix.lower() == ".sql":
+            files.append(child)
+        elif child.is_dir() and child.name.lower() not in RESERVED_QUERY_DIRS:
+            files.extend(iter_sql_files(child, version))
+    return files
+
+
+def has_version_children(path: Path) -> bool:
+    return (path / "light").is_dir() or (path / "full").is_dir()

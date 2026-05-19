@@ -73,7 +73,10 @@
         <div class="brand-block">
           <button class="icon-button" id="toggleSidebar" title="Collapse menu" aria-label="Collapse menu">☰</button>
           <div>
-            <h1>SQLSidekick</h1>
+            <div class="brand-title-row">
+              <h1>SQLSidekick</h1>
+              <span class="module-pill">Documentation module</span>
+            </div>
             <div class="connection-meta" id="connectionMeta">
               <span>Server: <strong id="serverLabel">-</strong></span>
               <span>Database: <strong id="databaseLabel">-</strong></span>
@@ -107,8 +110,9 @@
               <p id="activeDescription">Select a group from the left menu to review the discovered characteristics.</p>
             </div>
             <div class="actions">
-              <button class="tool-button" id="viewSql" title="View SQL" aria-label="View SQL" disabled>
-                <span class="icon-search" aria-hidden="true"></span>
+              <button class="tool-button alert-button hidden" id="openAlerts" title="Open alerts" aria-label="Open alerts">
+                <span class="icon-alert" aria-hidden="true">!</span>
+                <span class="alert-badge" id="alertBadge">0</span>
               </button>
               <button class="tool-button" id="runQuery" title="Refresh query" aria-label="Refresh query" disabled>
                 <span class="icon-refresh" aria-hidden="true">↻</span>
@@ -116,27 +120,25 @@
               <button class="tool-button" id="exportCsv" title="Export CSV" aria-label="Export CSV" disabled>
                 <span class="icon-file-csv" aria-hidden="true"><span>CSV</span></span>
               </button>
+              <button class="tool-button" id="openSettings" title="Settings" aria-label="Settings">
+                <span class="icon-gear" aria-hidden="true"></span>
+              </button>
             </div>
           </div>
 
           <div id="message" class="message hidden"></div>
 
-          <div class="summary" id="summary">
-            <div>
-              <span class="metric" id="rowCount">0</span>
-              <span>rows</span>
-            </div>
-            <div>
-              <span class="metric" id="columnCount">0</span>
-              <span>columns</span>
-            </div>
-            <label class="filter">
-              Search
-              <input id="filterText" placeholder="filter results..." />
-            </label>
-          </div>
-
           <div class="detail-surface">
+            <div class="table-tools hidden" id="tableTools">
+              <div class="table-counts">
+                <span><strong id="rowCount">0</strong> rows</span>
+                <span><strong id="columnCount">0</strong> columns</span>
+              </div>
+              <label class="filter">
+                <span id="filterLabel">Filter</span>
+                <input id="filterText" placeholder="filter results..." />
+              </label>
+            </div>
             <div id="cardView" class="card-grid hidden"></div>
             <div class="table-wrap">
               <table id="resultTable">
@@ -148,17 +150,72 @@
                 </tbody>
               </table>
             </div>
+            <div class="pagination hidden" id="pagination">
+              <span id="paginationInfo">Page 1 of 1</span>
+              <div class="pagination-actions">
+                <button class="pager-button" id="prevPage" title="Previous page" aria-label="Previous page" disabled>
+                  <span aria-hidden="true">&lt;</span>
+                </button>
+                <button class="pager-button" id="nextPage" title="Next page" aria-label="Next page" disabled>
+                  <span aria-hidden="true">&gt;</span>
+                </button>
+              </div>
+            </div>
           </div>
         </section>
       </main>
     </section>
 
-    <dialog id="sqlDialog">
+    <dialog id="alertsDialog" class="alerts-dialog">
       <div class="dialog-head">
-        <h2>SQL</h2>
-        <button id="closeSql" title="Close">x</button>
+        <h2 id="alertsTitle">Alerts</h2>
+        <button id="closeAlerts" title="Close">x</button>
       </div>
-      <pre id="sqlPreview"></pre>
+      <div class="alerts-body" id="alertsBody"></div>
+    </dialog>
+
+    <dialog id="tableDetailDialog" class="table-detail-dialog">
+      <div class="dialog-head">
+        <h2 id="tableDetailTitle">Table detail</h2>
+        <button id="closeTableDetail" title="Close">x</button>
+      </div>
+      <div class="detail-tabs" role="tablist" aria-label="Table detail sections">
+        <button class="detail-tab active" data-tab="columns" type="button">Columns</button>
+        <button class="detail-tab" data-tab="indexes" type="button">Indexes</button>
+        <button class="detail-tab" data-tab="foreignKeys" type="button">Foreign Keys</button>
+      </div>
+      <div class="table-detail-body" id="tableDetailBody"></div>
+    </dialog>
+
+    <dialog id="settingsDialog" class="settings-dialog">
+      <div class="dialog-head">
+        <h2>Settings</h2>
+        <button id="closeSettings" title="Close">x</button>
+      </div>
+      <div class="settings-body">
+        <section>
+          <h3>Script version</h3>
+          <p>Choose which SQL script set should be loaded in the explorer.</p>
+          <div class="segmented-control" role="radiogroup" aria-label="Script version">
+            <label>
+              <input type="radio" name="scriptVersion" value="light" />
+              <span>Light</span>
+            </label>
+            <label>
+              <input type="radio" name="scriptVersion" value="full" />
+              <span>Full</span>
+            </label>
+          </div>
+        </section>
+        <section>
+          <h3>Automatic alert checks</h3>
+          <p>Run category alert checks when opening a section.</p>
+          <label class="switch-row">
+            <input id="autoAlerts" type="checkbox" />
+            <span>Auto-detect alerts</span>
+          </label>
+        </section>
+      </div>
     </dialog>
 
     <script src="/static/app.js"></script>

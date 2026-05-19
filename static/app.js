@@ -1,19 +1,41 @@
 const QUERY_GROUPS = [
-  { title: "Server", names: ["server_overview"] },
+  {
+    title: "Server",
+    collapsed: true,
+    names: [
+      "server_overview",
+      "server_properties",
+      "server_databases_summary",
+      "server_runtime",
+      "server_configurations",
+      "server_services",
+      "server_logins",
+      "server_role_members",
+      "server_endpoints",
+      "linked_servers",
+      "availability_groups",
+    ],
+  },
   {
     title: "Database",
-    names: ["database_overview", "database_properties"],
+    names: [
+      "database_overview",
+      "database_properties",
+      "database_scoped_configurations",
+      "database_extended_properties",
+    ],
   },
   { title: "Storage", names: ["database_files", "filegroups", "space_usage"] },
-  { title: "Structure", names: ["schemas", "objects", "tables", "columns", "indexes", "foreign_keys"] },
+  { title: "Structure", names: ["schemas", "tables", "columns", "indexes", "foreign_keys"] },
   { title: "Constraints", names: ["key_constraints", "check_constraints", "default_constraints"] },
-  { title: "SQL Code", names: ["modules"] },
-  { title: "Security", names: ["database_principals", "database_permissions"] },
+  { title: "SQL Code", names: ["views", "procedures", "functions", "triggers"] },
+  {
+    title: "Security",
+    names: ["database_principals", "database_roles", "database_role_members", "database_permissions"],
+  },
   { title: "Analysis", names: ["review_findings", "index_usage", "index_physical_stats", "missing_indexes", "statistics"] },
   { title: "Operations", names: ["backup_history", "sql_agent_jobs", "extended_properties"] },
 ];
-
-const CARD_QUERIES = new Set(["server_overview", "database_overview", "database_properties"]);
 
 const CARD_GROUPS = {
   server_overview: [
@@ -94,6 +116,23 @@ const CARD_GROUPS = {
 };
 
 const CONNECTION_DRAFT_KEY = "sqlsidekick.connectionDraft";
+const SCRIPT_VERSION_KEY = "sqlsidekick.scriptVersion";
+const AUTO_ALERTS_KEY = "sqlsidekick.autoAlerts";
+const TABLE_PAGE_SIZE = 50;
+
+const GROUP_CATEGORY_SLUGS = {
+  Server: "server",
+  Database: "database",
+  Storage: "storage",
+  Structure: "structure",
+  Constraints: "constraints",
+  "SQL Code": "code",
+  "DB Users / Roles": "security",
+  Analysis: "analysis",
+  Operations: "operations",
+  Additional: "additional",
+  Documentation: "documentation",
+};
 
 const state = {
   connection: null,
@@ -103,6 +142,20 @@ const state = {
   activeGroup: "Documentation",
   rows: [],
   columns: [],
+  tablePage: 1,
+  filterColumn: "",
+  failedQueries: new Map(),
+  scriptVersion: loadScriptVersion(),
+  autoAlerts: loadAutoAlerts(),
+  alertsSweepId: 0,
+  alertsByCategory: {},
+  alerts: {
+    groupTitle: "",
+    category: "",
+    rows: [],
+    columns: [],
+    error: "",
+  },
 };
 
 const els = {
@@ -123,22 +176,39 @@ const els = {
   queryList: document.querySelector("#queryList"),
   refreshQueries: document.querySelector("#refreshQueries"),
   runQuery: document.querySelector("#runQuery"),
-  viewSql: document.querySelector("#viewSql"),
+  openAlerts: document.querySelector("#openAlerts"),
+  alertBadge: document.querySelector("#alertBadge"),
   exportCsv: document.querySelector("#exportCsv"),
+  openSettings: document.querySelector("#openSettings"),
   activeGroup: document.querySelector("#activeGroup"),
   title: document.querySelector("#activeTitle"),
   description: document.querySelector("#activeDescription"),
   message: document.querySelector("#message"),
-  summary: document.querySelector("#summary"),
+  tableTools: document.querySelector("#tableTools"),
   rowCount: document.querySelector("#rowCount"),
   columnCount: document.querySelector("#columnCount"),
+  filterLabel: document.querySelector("#filterLabel"),
   filterText: document.querySelector("#filterText"),
   cardView: document.querySelector("#cardView"),
   table: document.querySelector("#resultTable"),
   tableWrap: document.querySelector(".table-wrap"),
-  sqlDialog: document.querySelector("#sqlDialog"),
-  sqlPreview: document.querySelector("#sqlPreview"),
-  closeSql: document.querySelector("#closeSql"),
+  pagination: document.querySelector("#pagination"),
+  paginationInfo: document.querySelector("#paginationInfo"),
+  prevPage: document.querySelector("#prevPage"),
+  nextPage: document.querySelector("#nextPage"),
+  tableDetailDialog: document.querySelector("#tableDetailDialog"),
+  tableDetailTitle: document.querySelector("#tableDetailTitle"),
+  tableDetailBody: document.querySelector("#tableDetailBody"),
+  closeTableDetail: document.querySelector("#closeTableDetail"),
+  detailTabs: document.querySelectorAll(".detail-tab"),
+  alertsDialog: document.querySelector("#alertsDialog"),
+  alertsTitle: document.querySelector("#alertsTitle"),
+  alertsBody: document.querySelector("#alertsBody"),
+  closeAlerts: document.querySelector("#closeAlerts"),
+  settingsDialog: document.querySelector("#settingsDialog"),
+  closeSettings: document.querySelector("#closeSettings"),
+  scriptVersionInputs: document.querySelectorAll('input[name="scriptVersion"]'),
+  autoAlertsInput: document.querySelector("#autoAlerts"),
 };
 
 function getConnectionPayload() {
@@ -178,6 +248,42 @@ function loadConnectionDraft() {
 
 function saveConnectionDraft(connection) {
   localStorage.setItem(CONNECTION_DRAFT_KEY, JSON.stringify(connection));
+}
+
+function loadScriptVersion() {
+  const version = localStorage.getItem(SCRIPT_VERSION_KEY) || "full";
+  return ["light", "full"].includes(version) ? version : "full";
+}
+
+function loadAutoAlerts() {
+  return localStorage.getItem(AUTO_ALERTS_KEY) === "true";
+}
+
+function saveAutoAlerts(enabled) {
+  state.autoAlerts = Boolean(enabled);
+  localStorage.setItem(AUTO_ALERTS_KEY, state.autoAlerts ? "true" : "false");
+  updateAutoAlertsInput();
+  if (!state.autoAlerts) {
+    clearAlerts();
+  }
+}
+
+function saveScriptVersion(version) {
+  state.scriptVersion = ["light", "full"].includes(version) ? version : "full";
+  localStorage.setItem(SCRIPT_VERSION_KEY, state.scriptVersion);
+  updateScriptVersionInputs();
+}
+
+function updateScriptVersionInputs() {
+  els.scriptVersionInputs.forEach((input) => {
+    input.checked = input.value === state.scriptVersion;
+  });
+}
+
+function updateAutoAlertsInput() {
+  if (els.autoAlertsInput) {
+    els.autoAlertsInput.checked = state.autoAlerts;
+  }
 }
 
 async function api(path, options = {}) {
@@ -226,9 +332,17 @@ function goToConnection() {
 
 async function loadQueries() {
   renderQueryMenuLoading();
-  const payload = await api("/api/queries");
+  state.failedQueries.clear();
+  const payload = await api(`/api/queries?version=${encodeURIComponent(state.scriptVersion)}`);
   state.queries = payload.queries;
+  state.activeQuery = null;
+  state.rows = [];
+  state.columns = [];
+  state.tablePage = 1;
+  state.filterColumn = "";
+  clearAlerts();
   renderQueryMenu();
+  resetWorkspace();
 }
 
 async function loadDefaultConnection() {
@@ -249,10 +363,17 @@ function renderQueryMenu() {
   QUERY_GROUPS.forEach((group, index) => {
     const details = document.createElement("details");
     details.className = "menu-group";
-    details.open = index < 2;
+    details.dataset.category = groupCategorySlug(group.title);
+    details.open = group.collapsed ? false : index < 2;
 
     const summary = document.createElement("summary");
-    summary.textContent = group.title;
+    const title = document.createElement("span");
+    title.className = "menu-group-title";
+    title.textContent = group.title;
+    const alertIcon = document.createElement("span");
+    alertIcon.className = "menu-alert-icon hidden";
+    alertIcon.textContent = "!";
+    summary.append(title, alertIcon);
     details.appendChild(summary);
 
     const items = document.createElement("div");
@@ -266,8 +387,10 @@ function renderQueryMenu() {
         items.appendChild(createQueryButton(query, group.title));
       });
 
-    details.appendChild(items);
-    els.queryList.appendChild(details);
+    if (items.children.length > 0) {
+      details.appendChild(items);
+      els.queryList.appendChild(details);
+    }
   });
 
   const uncategorized = state.queries.filter((query) => !usedNames.has(query.name));
@@ -280,9 +403,10 @@ function renderQueryMenu() {
     const items = document.createElement("div");
     items.className = "menu-items";
     uncategorized.forEach((query) => items.appendChild(createQueryButton(query, "Additional")));
-    details.append(summary, items);
-    els.queryList.appendChild(details);
+      details.append(summary, items);
+      els.queryList.appendChild(details);
   }
+  renderGroupAlertBadges();
 }
 
 function renderQueryMenuLoading() {
@@ -301,7 +425,20 @@ function createQueryButton(query, groupTitle) {
   button.className = "query-item";
   button.dataset.name = query.name;
   button.dataset.group = groupTitle;
-  button.innerHTML = `<strong>${escapeHtml(query.title)}</strong><span>${escapeHtml(query.description)}</span>`;
+  const failedReason = state.failedQueries.get(query.name);
+  if (failedReason) {
+    button.classList.add("failed");
+    button.disabled = true;
+    button.title = failedReason;
+  } else {
+    button.title = query.description;
+  }
+  button.innerHTML = `
+    <span class="query-state-icon" aria-hidden="true">${failedReason ? "!" : ""}</span>
+    <span class="query-copy">
+      <strong>${escapeHtml(query.title)}</strong>
+    </span>
+  `;
   button.addEventListener("click", () => selectAndRunQuery(query.name, groupTitle));
   return button;
 }
@@ -309,6 +446,10 @@ function createQueryButton(query, groupTitle) {
 async function selectAndRunQuery(name, groupTitle) {
   setActiveQuery(name, groupTitle);
   if (state.connected) {
+    setCurrentAlertsFromGroup(groupTitle);
+    if (state.autoAlerts && !getStoredAlerts(groupTitle)) {
+      runAlertCheck(groupTitle);
+    }
     await runActiveQuery();
   } else {
     showMessage(els.message, "Connect first, then select a section to load its data.", "error");
@@ -320,21 +461,212 @@ function setActiveQuery(name, groupTitle) {
   state.activeGroup = groupTitle;
   state.rows = [];
   state.columns = [];
+  state.tablePage = 1;
+  state.filterColumn = "";
+  els.filterText.value = "";
   document.querySelectorAll(".query-item").forEach((item) => {
     item.classList.toggle("active", item.dataset.name === name);
   });
   els.activeGroup.textContent = groupTitle;
   els.title.textContent = state.activeQuery.title;
   els.description.textContent = state.activeQuery.description;
-  els.viewSql.disabled = false;
   els.runQuery.disabled = !state.connected;
   els.rowCount.textContent = "0";
   els.columnCount.textContent = "0";
   els.exportCsv.disabled = true;
   els.cardView.classList.add("hidden");
   els.tableWrap.classList.remove("hidden");
+  els.tableTools.classList.add("hidden");
+  els.pagination.classList.add("hidden");
   renderLoadingState();
   clearMessage(els.message);
+}
+
+async function runAllAlerts() {
+  if (!state.autoAlerts || !state.connected || !state.connection) {
+    return;
+  }
+  const sweepId = state.alertsSweepId + 1;
+  state.alertsSweepId = sweepId;
+  state.alertsByCategory = {};
+  setCurrentAlertsFromGroup(state.activeGroup);
+  renderGroupAlertBadges();
+
+  await Promise.all(getAlertableGroups().map((group) => runAlertCheck(group.title, sweepId)));
+}
+
+async function runAlertCheck(groupTitle, sweepId = state.alertsSweepId) {
+  if (!state.autoAlerts || !state.connected || !state.connection) {
+    return;
+  }
+  const category = groupCategorySlug(groupTitle);
+  if (!category || category === "additional" || category === "documentation") {
+    return;
+  }
+
+  try {
+    const payload = await api("/api/run-alerts", {
+      method: "POST",
+      body: JSON.stringify({
+        connection: state.connection,
+        category,
+      }),
+    });
+    const resultSet = payload.resultSets?.[0] || { columns: [], rows: [] };
+    if (sweepId !== state.alertsSweepId) return;
+    state.alertsByCategory[category] = {
+      groupTitle,
+      category,
+      rows: resultSet.rows || [],
+      columns: resultSet.columns || [],
+      error: "",
+    };
+  } catch (error) {
+    if (sweepId !== state.alertsSweepId) return;
+    state.alertsByCategory[category] = {
+      groupTitle,
+      category,
+      rows: [],
+      columns: [],
+      error: error.message,
+    };
+  }
+  renderGroupAlertBadges();
+  if (state.activeGroup === groupTitle) {
+    setCurrentAlertsFromGroup(groupTitle);
+  }
+}
+
+function groupCategorySlug(groupTitle) {
+  return GROUP_CATEGORY_SLUGS[groupTitle] || String(groupTitle || "").toLowerCase().replaceAll(" ", "_");
+}
+
+function getAlertableGroups() {
+  return QUERY_GROUPS.filter((group) => {
+    const category = groupCategorySlug(group.title);
+    if (!category || category === "additional" || category === "documentation") return false;
+    return group.names.some((name) => state.queries.some((query) => query.name === name));
+  });
+}
+
+function getStoredAlerts(groupTitle) {
+  return state.alertsByCategory[groupCategorySlug(groupTitle)];
+}
+
+function setCurrentAlertsFromGroup(groupTitle) {
+  const category = groupCategorySlug(groupTitle);
+  state.alerts = state.alertsByCategory[category] || {
+    groupTitle,
+    category,
+    rows: [],
+    columns: [],
+    error: "",
+  };
+  renderAlertIndicator();
+}
+
+function renderGroupAlertBadges() {
+  document.querySelectorAll(".menu-group").forEach((group) => {
+    const category = group.dataset.category;
+    const alertState = state.alertsByCategory[category];
+    const icon = group.querySelector(".menu-alert-icon");
+    if (!icon) return;
+    const hasAlerts = Boolean(alertState?.rows?.length);
+    const hasError = Boolean(alertState?.error);
+    const severity = getHighestAlertSeverity(alertState);
+    icon.classList.toggle("hidden", !hasAlerts && !hasError);
+    icon.classList.toggle("failed", hasError);
+    setSeverityClasses(icon, severity);
+    icon.title = hasError ? "Alert check failed" : "Alerts detected";
+  });
+}
+
+function clearAlerts() {
+  state.alertsSweepId += 1;
+  state.alertsByCategory = {};
+  state.alerts = { groupTitle: "", category: "", rows: [], columns: [], error: "" };
+  els.openAlerts.classList.add("hidden");
+  els.openAlerts.classList.remove("has-alerts", "failed");
+  els.alertBadge.textContent = "0";
+  renderGroupAlertBadges();
+}
+
+function renderAlertIndicator() {
+  const hasRows = state.alerts.rows.length > 0;
+  const hasError = Boolean(state.alerts.error);
+  const severity = getHighestAlertSeverity(state.alerts);
+  els.openAlerts.classList.toggle("hidden", !hasRows && !hasError);
+  els.openAlerts.classList.toggle("has-alerts", hasRows);
+  els.openAlerts.classList.toggle("failed", hasError);
+  setSeverityClasses(els.openAlerts, severity);
+  els.openAlerts.title = hasError ? "Alert check failed" : `Open ${state.alerts.rows.length} alerts`;
+  els.openAlerts.setAttribute("aria-label", els.openAlerts.title);
+  els.alertBadge.textContent = hasError ? "!" : String(state.alerts.rows.length);
+}
+
+function getHighestAlertSeverity(alertState) {
+  const firstRow = alertState?.rows?.[0];
+  const explicitSeverity = normalizeAlertSeverity(firstRow?.highest_detected_severity);
+  if (explicitSeverity !== "unknown") {
+    return explicitSeverity;
+  }
+  const ranks = { high: 1, medium: 2, low: 3, unknown: 4 };
+  return (alertState?.rows || []).reduce((highest, row) => {
+    const severity = normalizeAlertSeverity(row.severity);
+    return ranks[severity] < ranks[highest] ? severity : highest;
+  }, "unknown");
+}
+
+function normalizeAlertSeverity(value) {
+  const severity = String(value || "").trim().toLowerCase();
+  return ["high", "medium", "low"].includes(severity) ? severity : "unknown";
+}
+
+function setSeverityClasses(element, severity) {
+  element.classList.remove("severity-high", "severity-medium", "severity-low", "severity-unknown");
+  element.classList.add(`severity-${severity || "unknown"}`);
+}
+
+function openAlertsPanel() {
+  els.alertsTitle.textContent = state.alerts.groupTitle ? `${state.alerts.groupTitle} alerts` : "Alerts";
+  if (state.alerts.error) {
+    els.alertsBody.innerHTML = `<div class="alert-error">${escapeHtml(state.alerts.error)}</div>`;
+    els.alertsDialog.showModal();
+    return;
+  }
+  if (state.alerts.rows.length === 0) {
+    els.alertsBody.innerHTML = `<div class="empty">No active alerts.</div>`;
+    els.alertsDialog.showModal();
+    return;
+  }
+  els.alertsBody.innerHTML = renderAlertsTable();
+  els.alertsDialog.showModal();
+}
+
+function renderAlertsTable() {
+  const visibleColumns = state.alerts.columns.filter((column) => column !== "highest_detected_severity");
+  const headers = visibleColumns.map((column) => `<th>${escapeHtml(labelize(column))}</th>`).join("");
+  const rows = state.alerts.rows
+    .map((row) => {
+      const severity = String(row.severity || "").toLowerCase();
+      const cells = visibleColumns
+        .map((column) => `<td>${escapeHtml(formatValue(row[column]))}</td>`)
+        .join("");
+      return `<tr class="alert-row alert-${escapeHtml(severity)}">${cells}</tr>`;
+    })
+    .join("");
+  return `
+    <div class="alerts-summary">
+      <strong>${state.alerts.rows.length}</strong>
+      <span>active alerts detected for this category.</span>
+    </div>
+    <div class="alerts-table-wrap">
+      <table class="alerts-table">
+        <thead><tr>${headers}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
 }
 
 async function testConnection(event) {
@@ -360,6 +692,7 @@ async function testConnection(event) {
     if (!state.activeQuery && state.queries.length > 0) {
       const firstDatabaseQuery = state.queries.find((query) => query.name === "database_overview") || state.queries[0];
       setActiveQuery(firstDatabaseQuery.name, "Database");
+      runAllAlerts();
       await runActiveQuery();
     }
   } catch (error) {
@@ -388,35 +721,62 @@ async function runActiveQuery() {
       body: JSON.stringify({
         connection: state.connection,
         queryName: state.activeQuery.name,
+        scriptVersion: state.scriptVersion,
       }),
     });
     const resultSet = payload.resultSets?.[0] || { columns: [], rows: [] };
     state.columns = resultSet.columns || [];
     state.rows = resultSet.rows || [];
+    state.tablePage = 1;
+    state.filterColumn = getDefaultFilterColumn();
+    updateTableFilterUI();
     renderResults();
     clearMessage(els.message);
   } catch (error) {
+    markQueryFailed(state.activeQuery.name, error.message);
     showMessage(els.message, error.message, "error");
   } finally {
-    els.runQuery.disabled = !state.connected;
+    els.runQuery.disabled = !state.connected || state.failedQueries.has(state.activeQuery?.name);
     els.runQuery.innerHTML = `<span class="icon-refresh" aria-hidden="true">↻</span>`;
   }
 }
 
-async function viewActiveSql() {
-  if (!state.activeQuery) return;
-  const payload = await api(`/api/query-sql?name=${encodeURIComponent(state.activeQuery.name)}`);
-  els.sqlPreview.textContent = payload.sql;
-  els.sqlDialog.showModal();
+function markQueryFailed(queryName, reason) {
+  state.failedQueries.set(queryName, reason || "Query failed.");
+  const button = Array.from(document.querySelectorAll(".query-item")).find((item) => item.dataset.name === queryName);
+  if (!button) return;
+  button.classList.add("failed");
+  button.disabled = true;
+  button.title = state.failedQueries.get(queryName);
+  const icon = button.querySelector(".query-state-icon");
+  if (icon) icon.textContent = "!";
+  if (state.activeQuery?.name === queryName) {
+    els.runQuery.disabled = true;
+  }
+}
+
+function resetWorkspace() {
+  els.activeGroup.textContent = "Documentation";
+  els.title.textContent = "Choose a section";
+  els.description.textContent = "Select a group from the left menu to review the discovered characteristics.";
+  els.runQuery.disabled = true;
+  els.exportCsv.disabled = true;
+  clearAlerts();
+  els.tableTools.classList.add("hidden");
+  els.cardView.classList.add("hidden");
+  els.tableWrap.classList.remove("hidden");
+  els.pagination.classList.add("hidden");
+  renderEmptyTable("No results yet.");
+  clearMessage(els.message);
 }
 
 function renderResults() {
-  if (CARD_QUERIES.has(state.activeQuery?.name) && state.rows.length <= 1) {
+  if (state.rows.length <= 1) {
     renderCards();
     return;
   }
   els.message.classList.remove("hidden");
-  els.summary.classList.remove("hidden");
+  els.tableTools.classList.remove("hidden");
   els.cardView.classList.add("hidden");
   els.tableWrap.classList.remove("hidden");
   renderTable();
@@ -428,8 +788,9 @@ function renderCards() {
   els.columnCount.textContent = String(state.columns.length);
   els.exportCsv.disabled = state.rows.length === 0;
   els.message.classList.add("hidden");
-  els.summary.classList.add("hidden");
+  els.tableTools.classList.add("hidden");
   els.tableWrap.classList.add("hidden");
+  els.pagination.classList.add("hidden");
   els.cardView.classList.remove("hidden");
   els.cardView.innerHTML = "";
 
@@ -470,22 +831,27 @@ function renderCards() {
 
 function getCardGroups() {
   const configured = CARD_GROUPS[state.activeQuery?.name] || [];
-  return configured;
+  if (configured.length > 0) return configured;
+  return [{ title: "Details", fields: state.columns }];
 }
 
 function renderTable() {
   const filter = els.filterText.value.trim().toLowerCase();
   const rows = filter
-    ? state.rows.filter((row) =>
-        state.columns.some((column) => String(row[column] ?? "").toLowerCase().includes(filter)),
-      )
+    ? state.rows.filter((row) => rowMatchesFilter(row, filter))
     : state.rows;
+  const totalPages = Math.max(1, Math.ceil(rows.length / TABLE_PAGE_SIZE));
+  state.tablePage = Math.min(Math.max(1, state.tablePage), totalPages);
+  const startIndex = (state.tablePage - 1) * TABLE_PAGE_SIZE;
+  const visibleRows = rows.slice(startIndex, startIndex + TABLE_PAGE_SIZE);
 
   els.rowCount.textContent = String(rows.length);
   els.columnCount.textContent = String(state.columns.length);
   els.exportCsv.disabled = rows.length === 0;
+  els.tableTools.classList.remove("hidden");
   els.cardView.classList.add("hidden");
   els.tableWrap.classList.remove("hidden");
+  updatePagination(rows.length, totalPages, startIndex, visibleRows.length);
 
   const thead = els.table.querySelector("thead");
   const tbody = els.table.querySelector("tbody");
@@ -498,9 +864,16 @@ function renderTable() {
   }
 
   const headRow = document.createElement("tr");
+  if (isTablesQuery()) {
+    const detailTh = document.createElement("th");
+    detailTh.textContent = "";
+    detailTh.className = "row-action-header";
+    headRow.appendChild(detailTh);
+  }
   state.columns.forEach((column) => {
     const th = document.createElement("th");
-    th.textContent = column;
+    th.textContent = labelize(column);
+    th.title = column;
     headRow.appendChild(th);
   });
   thead.appendChild(headRow);
@@ -516,8 +889,21 @@ function renderTable() {
     return;
   }
 
-  rows.forEach((row) => {
+  visibleRows.forEach((row) => {
     const tr = document.createElement("tr");
+    if (isTablesQuery()) {
+      const actionTd = document.createElement("td");
+      actionTd.className = "row-action-cell";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "row-detail-button";
+      button.title = "Open table detail";
+      button.setAttribute("aria-label", "Open table detail");
+      button.textContent = "i";
+      button.addEventListener("click", () => openTableDetail(row));
+      actionTd.appendChild(button);
+      tr.appendChild(actionTd);
+    }
     state.columns.forEach((column) => {
       const td = document.createElement("td");
       td.textContent = row[column] ?? "";
@@ -527,11 +913,158 @@ function renderTable() {
   });
 }
 
+function rowMatchesFilter(row, filter) {
+  if (state.filterColumn && state.columns.includes(state.filterColumn)) {
+    return String(row[state.filterColumn] ?? "").toLowerCase().includes(filter);
+  }
+  return state.columns.some((column) => String(row[column] ?? "").toLowerCase().includes(filter));
+}
+
+function getDefaultFilterColumn() {
+  const preferredByQuery = {
+    tables: ["table_name"],
+    procedures: ["procedure_name", "object_name"],
+    views: ["view_name", "object_name"],
+    functions: ["function_name", "object_name"],
+    triggers: ["trigger_name", "object_name"],
+    columns: ["column_name", "object_name", "table_name"],
+    indexes: ["index_name", "table_name"],
+    foreign_keys: ["foreign_key_name", "parent_table", "referenced_table"],
+    schemas: ["schema_name"],
+    database_files: ["logical_name", "physical_name"],
+    filegroups: ["filegroup_name"],
+    server_databases_summary: ["database_name"],
+    database_scoped_configurations: ["configuration_name"],
+    database_extended_properties: ["property_name"],
+    database_principals: ["principal_name", "user_name", "name"],
+    database_roles: ["role_name", "name"],
+    database_role_members: ["role_name", "member_name"],
+    database_permissions: ["grantee_name", "principal_name", "permission_name"],
+    server_logins: ["login_name", "name"],
+    server_role_members: ["member_name", "role_name"],
+    linked_servers: ["linked_server_name", "name"],
+    server_configurations: ["configuration_name", "name"],
+    server_services: ["service_name", "servicename"],
+  };
+  const candidates = preferredByQuery[state.activeQuery?.name] || [];
+  return candidates.find((column) => state.columns.includes(column)) || inferNameColumn();
+}
+
+function inferNameColumn() {
+  return (
+    state.columns.find((column) => column.endsWith("_name")) ||
+    state.columns.find((column) => column === "name") ||
+    ""
+  );
+}
+
+function updateTableFilterUI() {
+  const label = state.filterColumn ? `Filter by ${labelize(state.filterColumn)}` : "Filter";
+  els.filterLabel.textContent = label;
+  els.filterText.placeholder = state.filterColumn ? `filter ${labelize(state.filterColumn).toLowerCase()}...` : "filter results...";
+}
+
+function isTablesQuery() {
+  return state.activeQuery?.name === "tables";
+}
+
+async function openTableDetail(row) {
+  const schemaName = row.schema_name;
+  const tableName = row.table_name;
+  if (!schemaName || !tableName || !state.connection) return;
+
+  els.tableDetailTitle.textContent = `${schemaName}.${tableName}`;
+  setActiveDetailTab("columns");
+  els.tableDetailBody.innerHTML = `
+    <div class="detail-loading">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <span>Loading table detail</span>
+    </div>
+  `;
+  els.tableDetailDialog.showModal();
+
+  try {
+    const payload = await api("/api/table-detail", {
+      method: "POST",
+      body: JSON.stringify({
+        connection: state.connection,
+        schemaName,
+        tableName,
+      }),
+    });
+    const detail = {
+      columns: payload.resultSets?.[0] || { columns: [], rows: [] },
+      indexes: payload.resultSets?.[1] || { columns: [], rows: [] },
+      foreignKeys: payload.resultSets?.[2] || { columns: [], rows: [] },
+    };
+    els.tableDetailDialog.dataset.detail = JSON.stringify(detail);
+    renderTableDetailTab("columns");
+  } catch (error) {
+    els.tableDetailBody.innerHTML = `<div class="alert-error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function setActiveDetailTab(tabName) {
+  els.detailTabs.forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.tab === tabName);
+  });
+}
+
+function renderTableDetailTab(tabName) {
+  setActiveDetailTab(tabName);
+  const detail = JSON.parse(els.tableDetailDialog.dataset.detail || "{}");
+  const resultSet = detail[tabName] || { columns: [], rows: [] };
+  els.tableDetailBody.innerHTML = renderDetailResultSet(resultSet);
+}
+
+function renderDetailResultSet(resultSet) {
+  const columns = resultSet.columns || [];
+  const rows = resultSet.rows || [];
+  if (columns.length === 0) {
+    return `<div class="empty">No detail columns to display.</div>`;
+  }
+  if (rows.length === 0) {
+    return `<div class="empty">No rows to display.</div>`;
+  }
+  const headers = columns.map((column) => `<th>${escapeHtml(labelize(column))}</th>`).join("");
+  const body = rows
+    .map((row) => {
+      const cells = columns.map((column) => `<td>${escapeHtml(formatValue(row[column]))}</td>`).join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+  return `
+    <div class="detail-table-wrap">
+      <table class="detail-table">
+        <thead><tr>${headers}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function updatePagination(totalRows, totalPages, startIndex, visibleCount) {
+  els.pagination.classList.toggle("hidden", totalRows <= TABLE_PAGE_SIZE);
+  if (totalRows <= TABLE_PAGE_SIZE) {
+    return;
+  }
+  const endIndex = startIndex + visibleCount;
+  els.paginationInfo.textContent = `Rows ${startIndex + 1}-${endIndex} of ${totalRows} | Page ${state.tablePage} of ${totalPages}`;
+  els.prevPage.disabled = state.tablePage <= 1;
+  els.nextPage.disabled = state.tablePage >= totalPages;
+}
+
+function changePage(delta) {
+  state.tablePage += delta;
+  renderTable();
+}
+
 function renderEmptyTable(message) {
   const thead = els.table.querySelector("thead");
   const tbody = els.table.querySelector("tbody");
   thead.innerHTML = "";
   tbody.innerHTML = `<tr><td class="empty">${escapeHtml(message)}</td></tr>`;
+  els.pagination.classList.add("hidden");
 }
 
 function renderLoadingState() {
@@ -556,7 +1089,7 @@ function renderLoadingState() {
 
 function exportCsv() {
   const lines = [
-    state.columns.map(csvValue).join(","),
+    state.columns.map((column) => csvValue(labelize(column))).join(","),
     ...state.rows.map((row) => state.columns.map((column) => csvValue(row[column])).join(",")),
   ];
   const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
@@ -577,10 +1110,23 @@ function labelize(value) {
   return String(value)
     .replaceAll("_", " ")
     .replace(/\b\w/g, (char) => char.toUpperCase())
+    .replace(/\bDatabase\b/g, "DB")
     .replace(/\bGb\b/g, "GB")
     .replace(/\bMb\b/g, "MB")
     .replace(/\bSql\b/g, "SQL")
-    .replace(/\bId\b/g, "ID");
+    .replace(/\bId\b/g, "ID")
+    .replace(/\bCpu\b/g, "CPU")
+    .replace(/\bDml\b/g, "DML")
+    .replace(/\bDdl\b/g, "DDL")
+    .replace(/\bDmv\b/g, "DMV")
+    .replace(/\bHadr\b/g, "HADR")
+    .replace(/\bAnsi\b/g, "ANSI")
+    .replace(/\bIo\b/g, "IO")
+    .replace(/\bUrl\b/g, "URL")
+    .replace(/\bXml\b/g, "XML")
+    .replace(/\bJson\b/g, "JSON")
+    .replace(/\bRpc\b/g, "RPC")
+    .replace(/\bTcp\b/g, "TCP");
 }
 
 function formatValue(value) {
@@ -600,11 +1146,52 @@ function escapeHtml(value) {
 els.form.addEventListener("submit", testConnection);
 els.authType.addEventListener("change", updateAuthFields);
 els.refreshQueries.addEventListener("click", loadQueries);
-els.runQuery.addEventListener("click", runActiveQuery);
-els.viewSql.addEventListener("click", viewActiveSql);
+els.runQuery.addEventListener("click", async () => {
+  if (state.autoAlerts) {
+    runAlertCheck(state.activeGroup);
+  }
+  await runActiveQuery();
+});
 els.exportCsv.addEventListener("click", exportCsv);
-els.filterText.addEventListener("input", renderTable);
-els.closeSql.addEventListener("click", () => els.sqlDialog.close());
+els.filterText.addEventListener("input", () => {
+  state.tablePage = 1;
+  renderTable();
+});
+els.prevPage.addEventListener("click", () => changePage(-1));
+els.nextPage.addEventListener("click", () => changePage(1));
+els.openAlerts.addEventListener("click", openAlertsPanel);
+els.closeAlerts.addEventListener("click", () => els.alertsDialog.close());
+els.closeTableDetail.addEventListener("click", () => els.tableDetailDialog.close());
+els.detailTabs.forEach((tab) => {
+  tab.addEventListener("click", () => renderTableDetailTab(tab.dataset.tab));
+});
+els.openSettings.addEventListener("click", () => {
+  updateScriptVersionInputs();
+  updateAutoAlertsInput();
+  els.settingsDialog.showModal();
+});
+els.closeSettings.addEventListener("click", () => els.settingsDialog.close());
+els.autoAlertsInput.addEventListener("change", () => {
+  saveAutoAlerts(els.autoAlertsInput.checked);
+  if (state.autoAlerts && state.connected && state.activeQuery) {
+    runAllAlerts();
+  }
+});
+els.scriptVersionInputs.forEach((input) => {
+  input.addEventListener("change", async () => {
+    saveScriptVersion(input.value);
+    await loadQueries();
+    if (state.connected) {
+      const firstDatabaseQuery = state.queries.find((query) => query.name === "database_overview") || state.queries[0];
+      if (firstDatabaseQuery) {
+        setActiveQuery(firstDatabaseQuery.name, firstDatabaseQuery.name === "database_overview" ? "Database" : "Documentation");
+        runAllAlerts();
+        await runActiveQuery();
+      }
+    }
+    els.settingsDialog.close();
+  });
+});
 els.changeConnection.addEventListener("click", goToConnection);
 els.toggleSidebar.addEventListener("click", () => {
   els.appLayout.classList.toggle("sidebar-collapsed");
@@ -612,6 +1199,8 @@ els.toggleSidebar.addEventListener("click", () => {
 
 async function initializeApp() {
   updateAuthFields();
+  updateScriptVersionInputs();
+  updateAutoAlertsInput();
   loadConnectionDraft();
   await loadDefaultConnection();
   await loadQueries();

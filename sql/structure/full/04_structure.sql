@@ -1,4 +1,4 @@
-﻿-- name: schemas
+-- name: schemas
 -- title: Schemas
 -- description: User schemas, owners, and object counts.
 SELECT
@@ -23,23 +23,6 @@ GROUP BY
     s.schema_id
 ORDER BY s.name;
 
--- name: objects
--- title: Objects
--- description: Inventory of tables, views, procedures, functions, triggers, and other objects.
-SELECT
-    s.name AS schema_name,
-    o.name AS object_name,
-    o.type,
-    o.type_desc,
-    CONVERT(varchar(19), o.create_date, 120) AS create_date,
-    CONVERT(varchar(19), o.modify_date, 120) AS modify_date,
-    CASE WHEN o.is_ms_shipped = 1 THEN 'system' ELSE 'user' END AS object_scope
-FROM sys.objects AS o
-INNER JOIN sys.schemas AS s
-    ON s.schema_id = o.schema_id
-WHERE o.is_ms_shipped = 0
-ORDER BY s.name, o.type_desc, o.name;
-
 -- name: tables
 -- title: Tables
 -- description: Tables with approximate row count, reserved size, and used size.
@@ -50,8 +33,8 @@ SELECT
     CAST(SUM(a.total_pages) * 8.0 / 1024 / 1024 AS decimal(18, 2)) AS reserved_gb,
     CAST(SUM(a.used_pages) * 8.0 / 1024 / 1024 AS decimal(18, 2)) AS used_gb,
     CAST((SUM(a.total_pages) - SUM(a.used_pages)) * 8.0 / 1024 / 1024 AS decimal(18, 2)) AS unused_gb,
-    CONVERT(varchar(19), t.create_date, 120) AS create_date,
-    CONVERT(varchar(19), t.modify_date, 120) AS modify_date,
+    CONVERT(varchar(16), t.create_date, 120) AS create_date,
+    CONVERT(varchar(16), t.modify_date, 120) AS modify_date,
     t.temporal_type_desc,
     t.is_memory_optimized
 FROM sys.tables AS t
