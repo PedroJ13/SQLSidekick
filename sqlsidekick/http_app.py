@@ -82,6 +82,9 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/table-detail":
             self.handle_table_detail()
             return
+        if parsed.path == "/api/code-object-detail":
+            self.handle_code_object_detail()
+            return
         self.send_json({"error": "Ruta no encontrada."}, status=404)
 
     def handle_run_query(self) -> None:
@@ -135,6 +138,21 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
             return
 
         sql = table_detail_sql(schema_name, table_name)
+
+        def action(settings: ConnectionSettings) -> dict[str, Any]:
+            return execute_query(settings, sql)
+
+        self.handle_sql_action(action, payload=payload)
+
+    def handle_code_object_detail(self) -> None:
+        payload = self.read_json()
+        schema_name = str(payload.get("schemaName", "")).strip()
+        object_name = str(payload.get("objectName", "")).strip()
+        if not schema_name or not object_name:
+            self.send_json({"error": "Schema and object are required."}, status=400)
+            return
+
+        sql = code_object_detail_sql(schema_name, object_name)
 
         def action(settings: ConnectionSettings) -> dict[str, Any]:
             return execute_query(settings, sql)
@@ -288,4 +306,69 @@ INNER JOIN sys.columns AS rc
 WHERE fk.parent_object_id = @object_id
    OR fk.referenced_object_id = @object_id
 ORDER BY relationship_direction, fk.name, fkc.constraint_column_id;
+
+WITH referencing_code AS (
+    SELECT DISTINCT
+        s.name AS schema_name,
+        o.name AS object_name,
+        o.type_desc AS object_type,
+        CONVERT(varchar(16), o.create_date, 120) AS create_date,
+        CONVERT(varchar(16), o.modify_date, 120) AS modify_date
+    FROM sys.sql_expression_dependencies AS sed
+    INNER JOIN sys.objects AS o
+        ON o.object_id = sed.referencing_id
+    INNER JOIN sys.schemas AS s
+        ON s.schema_id = o.schema_id
+    WHERE o.is_ms_shipped = 0
+      AND o.object_id <> @object_id
+      AND o.type IN ('V', 'P', 'FN', 'IF', 'TF', 'TR')
+      AND (
+          sed.referenced_id = @object_id
+          OR (
+              sed.referenced_schema_name = @schema_name
+              AND sed.referenced_entity_name = @table_name
+          )
+      )
+)
+SELECT
+    schema_name,
+    object_name,
+    object_type,
+    create_date,
+    modify_date
+FROM referencing_code;
+"""
+
+
+def code_object_detail_sql(schema_name: str, object_name: str) -> str:
+    schema_value = sql_literal(schema_name)
+    object_value = sql_literal(object_name)
+    return f"""
+DECLARE @schema_name sysname = {schema_value};
+DECLARE @object_name sysname = {object_value};
+DECLARE @object_id int = OBJECT_ID(QUOTENAME(@schema_name) + N'.' + QUOTENAME(@object_name));
+
+WITH referenced_objects AS (
+    SELECT DISTINCT
+        COALESCE(referenced_schema.name, sed.referenced_schema_name) AS referenced_schema_name,
+        COALESCE(referenced_object.name, sed.referenced_entity_name) AS referenced_object_name,
+        referenced_object.type_desc AS referenced_object_type,
+        sed.referenced_database_name,
+        sed.referenced_server_name,
+        CASE WHEN referenced_object.type = 'U' THEN 1 ELSE 0 END AS is_table_reference
+    FROM sys.sql_expression_dependencies AS sed
+    LEFT JOIN sys.objects AS referenced_object
+        ON referenced_object.object_id = sed.referenced_id
+    LEFT JOIN sys.schemas AS referenced_schema
+        ON referenced_schema.schema_id = referenced_object.schema_id
+    WHERE sed.referencing_id = @object_id
+)
+SELECT
+    referenced_schema_name,
+    referenced_object_name,
+    referenced_object_type,
+    referenced_database_name,
+    referenced_server_name,
+    is_table_reference
+FROM referenced_objects;
 """

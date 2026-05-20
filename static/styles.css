@@ -312,8 +312,33 @@ button:disabled {
 }
 
 .app-layout.sidebar-collapsed .sidebar-head div,
+.app-layout.sidebar-collapsed .module-tabs,
 .app-layout.sidebar-collapsed .object-menu {
   display: none;
+}
+
+.module-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.module-tab {
+  min-height: 36px;
+  padding: 7px 8px;
+  background: #fff;
+  color: var(--brand);
+  border-color: var(--line);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.module-tab:hover:not(:disabled),
+.module-tab.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
 }
 
 .object-menu {
@@ -321,6 +346,28 @@ button:disabled {
   gap: 12px;
   margin-top: 16px;
 }
+
+.module-empty {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+}
+
+.module-empty strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.module-empty span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 
 .menu-group {
   border: 1px solid var(--line);

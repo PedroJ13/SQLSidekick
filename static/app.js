@@ -1,4 +1,4 @@
-const QUERY_GROUPS = [
+const DOCUMENTATION_GROUPS = [
   {
     title: "Server",
     collapsed: true,
@@ -34,7 +34,52 @@ const QUERY_GROUPS = [
     names: ["database_principals", "database_roles", "database_role_members", "database_permissions"],
   },
   { title: "Analysis", names: ["review_findings", "index_usage", "index_physical_stats", "missing_indexes", "statistics"] },
-  { title: "Operations", names: ["backup_history", "sql_agent_jobs", "extended_properties"] },
+];
+
+const PROCESS_GROUPS = [
+  {
+    title: "SQL Agent Jobs",
+    names: ["sql_agent_jobs", "sql_agent_job_steps", "sql_agent_job_schedules", "sql_agent_job_history"],
+  },
+];
+
+const NAV_AREAS = [
+  {
+    id: "documentation",
+    title: "Documentation",
+    pill: "Documentation module",
+    heading: "Documentation",
+    emptyTitle: "Choose a section",
+    emptyDescription: "Select a documentation group from the left menu to review the discovered characteristics.",
+    groups: DOCUMENTATION_GROUPS,
+  },
+  {
+    id: "processes",
+    title: "Processes",
+    pill: "Processes module",
+    heading: "Processes",
+    emptyTitle: "Choose a process section",
+    emptyDescription: "Start with SQL Agent jobs, steps, schedules, and history as the first layer of process documentation.",
+    groups: PROCESS_GROUPS,
+  },
+  {
+    id: "lineage",
+    title: "Lineage",
+    pill: "Lineage module",
+    heading: "Lineage",
+    emptyTitle: "Lineage is next",
+    emptyDescription: "This area will show upstream, downstream, and impact views once process relationships are available.",
+    groups: [],
+  },
+  {
+    id: "health",
+    title: "Health",
+    pill: "Health module",
+    heading: "Health",
+    emptyTitle: "Health checks",
+    emptyDescription: "This area will collect alerts and operational checks across documentation and process modules.",
+    groups: [],
+  },
 ];
 
 const CARD_GROUPS = {
@@ -128,10 +173,14 @@ const GROUP_CATEGORY_SLUGS = {
   Constraints: "constraints",
   "SQL Code": "code",
   "DB Users / Roles": "security",
+  "SQL Agent Jobs": "jobs",
   Analysis: "analysis",
   Operations: "operations",
   Additional: "additional",
   Documentation: "documentation",
+  Processes: "processes",
+  Lineage: "lineage",
+  Health: "health",
 };
 
 const state = {
@@ -139,6 +188,7 @@ const state = {
   connected: false,
   queries: [],
   activeQuery: null,
+  activeArea: "documentation",
   activeGroup: "Documentation",
   rows: [],
   columns: [],
@@ -173,6 +223,9 @@ const els = {
   connectionMessage: document.querySelector("#connectionMessage"),
   changeConnection: document.querySelector("#changeConnection"),
   toggleSidebar: document.querySelector("#toggleSidebar"),
+  modulePill: document.querySelector("#modulePill"),
+  moduleTabs: document.querySelector("#moduleTabs"),
+  sidebarTitle: document.querySelector("#sidebarTitle"),
   queryList: document.querySelector("#queryList"),
   refreshQueries: document.querySelector("#refreshQueries"),
   runQuery: document.querySelector("#runQuery"),
@@ -201,6 +254,10 @@ const els = {
   tableDetailBody: document.querySelector("#tableDetailBody"),
   closeTableDetail: document.querySelector("#closeTableDetail"),
   detailTabs: document.querySelectorAll(".detail-tab"),
+  codeDetailDialog: document.querySelector("#codeDetailDialog"),
+  codeDetailTitle: document.querySelector("#codeDetailTitle"),
+  codeDetailBody: document.querySelector("#codeDetailBody"),
+  closeCodeDetail: document.querySelector("#closeCodeDetail"),
   alertsDialog: document.querySelector("#alertsDialog"),
   alertsTitle: document.querySelector("#alertsTitle"),
   alertsBody: document.querySelector("#alertsBody"),
@@ -341,6 +398,7 @@ async function loadQueries() {
   state.tablePage = 1;
   state.filterColumn = "";
   clearAlerts();
+  renderModuleTabs();
   renderQueryMenu();
   resetWorkspace();
 }
@@ -358,9 +416,12 @@ async function loadDefaultConnection() {
 
 function renderQueryMenu() {
   els.queryList.innerHTML = "";
-  const usedNames = new Set();
+  const area = getActiveArea();
+  const groups = getVisibleGroups(area);
+  const usedNames = new Set(getAllQueryGroups().flatMap((group) => group.names));
+  updateAreaChrome(area);
 
-  QUERY_GROUPS.forEach((group, index) => {
+  groups.forEach((group, index) => {
     const details = document.createElement("details");
     details.className = "menu-group";
     details.dataset.category = groupCategorySlug(group.title);
@@ -393,7 +454,7 @@ function renderQueryMenu() {
     }
   });
 
-  const uncategorized = state.queries.filter((query) => !usedNames.has(query.name));
+  const uncategorized = area.id === "documentation" ? state.queries.filter((query) => !usedNames.has(query.name)) : [];
   if (uncategorized.length > 0) {
     const details = document.createElement("details");
     details.className = "menu-group";
@@ -406,7 +467,61 @@ function renderQueryMenu() {
       details.append(summary, items);
       els.queryList.appendChild(details);
   }
+  if (els.queryList.children.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "module-empty";
+    empty.innerHTML = `
+      <strong>${escapeHtml(area.emptyTitle)}</strong>
+      <span>${escapeHtml(area.emptyDescription)}</span>
+    `;
+    els.queryList.appendChild(empty);
+  }
   renderGroupAlertBadges();
+}
+
+function renderModuleTabs() {
+  if (!els.moduleTabs) return;
+  els.moduleTabs.innerHTML = "";
+  NAV_AREAS.forEach((area) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "module-tab";
+    button.dataset.area = area.id;
+    button.textContent = area.title;
+    button.classList.toggle("active", area.id === state.activeArea);
+    button.addEventListener("click", () => switchArea(area.id));
+    els.moduleTabs.appendChild(button);
+  });
+}
+
+function switchArea(areaId) {
+  if (state.activeArea === areaId) return;
+  state.activeArea = areaId;
+  state.activeQuery = null;
+  state.rows = [];
+  state.columns = [];
+  state.tablePage = 1;
+  state.filterColumn = "";
+  renderModuleTabs();
+  renderQueryMenu();
+  resetWorkspace();
+}
+
+function getActiveArea() {
+  return NAV_AREAS.find((area) => area.id === state.activeArea) || NAV_AREAS[0];
+}
+
+function getAllQueryGroups() {
+  return NAV_AREAS.flatMap((area) => area.groups);
+}
+
+function getVisibleGroups(area = getActiveArea()) {
+  return area.groups.filter((group) => group.names.some((name) => state.queries.some((query) => query.name === name)));
+}
+
+function updateAreaChrome(area = getActiveArea()) {
+  if (els.modulePill) els.modulePill.textContent = area.pill;
+  if (els.sidebarTitle) els.sidebarTitle.textContent = area.heading;
 }
 
 function renderQueryMenuLoading() {
@@ -542,7 +657,7 @@ function groupCategorySlug(groupTitle) {
 }
 
 function getAlertableGroups() {
-  return QUERY_GROUPS.filter((group) => {
+  return getAllQueryGroups().filter((group) => {
     const category = groupCategorySlug(group.title);
     if (!category || category === "additional" || category === "documentation") return false;
     return group.names.some((name) => state.queries.some((query) => query.name === name));
@@ -756,9 +871,11 @@ function markQueryFailed(queryName, reason) {
 }
 
 function resetWorkspace() {
-  els.activeGroup.textContent = "Documentation";
-  els.title.textContent = "Choose a section";
-  els.description.textContent = "Select a group from the left menu to review the discovered characteristics.";
+  const area = getActiveArea();
+  updateAreaChrome(area);
+  els.activeGroup.textContent = area.title;
+  els.title.textContent = area.emptyTitle;
+  els.description.textContent = area.emptyDescription;
   els.runQuery.disabled = true;
   els.exportCsv.disabled = true;
   clearAlerts();
@@ -864,7 +981,7 @@ function renderTable() {
   }
 
   const headRow = document.createElement("tr");
-  if (isTablesQuery()) {
+  if (hasRowDetail()) {
     const detailTh = document.createElement("th");
     detailTh.textContent = "";
     detailTh.className = "row-action-header";
@@ -881,7 +998,7 @@ function renderTable() {
   if (rows.length === 0) {
     const td = document.createElement("td");
     td.className = "empty";
-    td.colSpan = state.columns.length;
+    td.colSpan = state.columns.length + (hasRowDetail() ? 1 : 0);
     td.textContent = "No rows to display.";
     const tr = document.createElement("tr");
     tr.appendChild(td);
@@ -891,16 +1008,22 @@ function renderTable() {
 
   visibleRows.forEach((row) => {
     const tr = document.createElement("tr");
-    if (isTablesQuery()) {
+    if (hasRowDetail()) {
       const actionTd = document.createElement("td");
       actionTd.className = "row-action-cell";
       const button = document.createElement("button");
       button.type = "button";
       button.className = "row-detail-button";
-      button.title = "Open table detail";
-      button.setAttribute("aria-label", "Open table detail");
+      button.title = isTablesQuery() ? "Open table detail" : "Open SQL code detail";
+      button.setAttribute("aria-label", button.title);
       button.textContent = "i";
-      button.addEventListener("click", () => openTableDetail(row));
+      button.addEventListener("click", () => {
+        if (isTablesQuery()) {
+          openTableDetail(row);
+        } else {
+          openCodeDetail(row);
+        }
+      });
       actionTd.appendChild(button);
       tr.appendChild(actionTd);
     }
@@ -945,6 +1068,10 @@ function getDefaultFilterColumn() {
     linked_servers: ["linked_server_name", "name"],
     server_configurations: ["configuration_name", "name"],
     server_services: ["service_name", "servicename"],
+    sql_agent_jobs: ["job_name"],
+    sql_agent_job_steps: ["job_name", "step_name"],
+    sql_agent_job_schedules: ["job_name", "schedule_name"],
+    sql_agent_job_history: ["job_name"],
   };
   const candidates = preferredByQuery[state.activeQuery?.name] || [];
   return candidates.find((column) => state.columns.includes(column)) || inferNameColumn();
@@ -966,6 +1093,14 @@ function updateTableFilterUI() {
 
 function isTablesQuery() {
   return state.activeQuery?.name === "tables";
+}
+
+function isCodeQuery() {
+  return ["views", "procedures", "functions", "triggers"].includes(state.activeQuery?.name);
+}
+
+function hasRowDetail() {
+  return isTablesQuery() || isCodeQuery();
 }
 
 async function openTableDetail(row) {
@@ -996,12 +1131,53 @@ async function openTableDetail(row) {
       columns: payload.resultSets?.[0] || { columns: [], rows: [] },
       indexes: payload.resultSets?.[1] || { columns: [], rows: [] },
       foreignKeys: payload.resultSets?.[2] || { columns: [], rows: [] },
+      sqlCode: payload.resultSets?.[3] || { columns: [], rows: [] },
     };
     els.tableDetailDialog.dataset.detail = JSON.stringify(detail);
     renderTableDetailTab("columns");
   } catch (error) {
     els.tableDetailBody.innerHTML = `<div class="alert-error">${escapeHtml(error.message)}</div>`;
   }
+}
+
+async function openCodeDetail(row) {
+  const schemaName = row.schema_name;
+  const objectName = getCodeObjectName(row);
+  if (!schemaName || !objectName || !state.connection) return;
+
+  els.codeDetailTitle.textContent = `${schemaName}.${objectName}`;
+  els.codeDetailBody.innerHTML = `
+    <div class="detail-loading">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <span>Loading referenced objects</span>
+    </div>
+  `;
+  els.codeDetailDialog.showModal();
+
+  try {
+    const payload = await api("/api/code-object-detail", {
+      method: "POST",
+      body: JSON.stringify({
+        connection: state.connection,
+        schemaName,
+        objectName,
+      }),
+    });
+    const resultSet = payload.resultSets?.[0] || { columns: [], rows: [] };
+    els.codeDetailBody.innerHTML = renderDetailResultSet(resultSet);
+  } catch (error) {
+    els.codeDetailBody.innerHTML = `<div class="alert-error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function getCodeObjectName(row) {
+  const nameColumns = {
+    views: "view_name",
+    procedures: "procedure_name",
+    functions: "function_name",
+    triggers: "trigger_name",
+  };
+  return row[nameColumns[state.activeQuery?.name]] || row.object_name || "";
 }
 
 function setActiveDetailTab(tabName) {
@@ -1162,6 +1338,7 @@ els.nextPage.addEventListener("click", () => changePage(1));
 els.openAlerts.addEventListener("click", openAlertsPanel);
 els.closeAlerts.addEventListener("click", () => els.alertsDialog.close());
 els.closeTableDetail.addEventListener("click", () => els.tableDetailDialog.close());
+els.closeCodeDetail.addEventListener("click", () => els.codeDetailDialog.close());
 els.detailTabs.forEach((tab) => {
   tab.addEventListener("click", () => renderTableDetailTab(tab.dataset.tab));
 });
@@ -1184,6 +1361,9 @@ els.scriptVersionInputs.forEach((input) => {
     if (state.connected) {
       const firstDatabaseQuery = state.queries.find((query) => query.name === "database_overview") || state.queries[0];
       if (firstDatabaseQuery) {
+        state.activeArea = "documentation";
+        renderModuleTabs();
+        renderQueryMenu();
         setActiveQuery(firstDatabaseQuery.name, firstDatabaseQuery.name === "database_overview" ? "Database" : "Documentation");
         runAllAlerts();
         await runActiveQuery();

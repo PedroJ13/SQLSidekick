@@ -75,7 +75,7 @@
           <div>
             <div class="brand-title-row">
               <h1>SQLSidekick</h1>
-              <span class="module-pill">Documentation module</span>
+              <span class="module-pill" id="modulePill">Documentation module</span>
             </div>
             <div class="connection-meta" id="connectionMeta">
               <span>Server: <strong id="serverLabel">-</strong></span>
@@ -95,10 +95,11 @@
           <div class="sidebar-head">
             <div>
               <p class="eyebrow">Explorer</p>
-              <h2>Objects</h2>
+              <h2 id="sidebarTitle">Documentation</h2>
             </div>
             <button class="icon-button" id="refreshQueries" title="Reload queries" aria-label="Reload queries">↻</button>
           </div>
+          <nav id="moduleTabs" class="module-tabs" aria-label="SQLSidekick modules"></nav>
           <nav id="queryList" class="object-menu"></nav>
         </aside>
 
@@ -183,8 +184,17 @@
         <button class="detail-tab active" data-tab="columns" type="button">Columns</button>
         <button class="detail-tab" data-tab="indexes" type="button">Indexes</button>
         <button class="detail-tab" data-tab="foreignKeys" type="button">Foreign Keys</button>
+        <button class="detail-tab" data-tab="sqlCode" type="button">SQL Code</button>
       </div>
       <div class="table-detail-body" id="tableDetailBody"></div>
+    </dialog>
+
+    <dialog id="codeDetailDialog" class="table-detail-dialog">
+      <div class="dialog-head">
+        <h2 id="codeDetailTitle">SQL Code detail</h2>
+        <button id="closeCodeDetail" title="Close">x</button>
+      </div>
+      <div class="table-detail-body" id="codeDetailBody"></div>
     </dialog>
 
     <dialog id="settingsDialog" class="settings-dialog">
