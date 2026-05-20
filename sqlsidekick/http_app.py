@@ -85,6 +85,12 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/code-object-detail":
             self.handle_code_object_detail()
             return
+        if parsed.path == "/api/process-detail":
+            self.handle_process_detail()
+            return
+        if parsed.path == "/api/process-step-sql-objects":
+            self.handle_process_step_sql_objects()
+            return
         self.send_json({"error": "Ruta no encontrada."}, status=404)
 
     def handle_run_query(self) -> None:
@@ -153,6 +159,37 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
             return
 
         sql = code_object_detail_sql(schema_name, object_name)
+
+        def action(settings: ConnectionSettings) -> dict[str, Any]:
+            return execute_query(settings, sql)
+
+        self.handle_sql_action(action, payload=payload)
+
+    def handle_process_detail(self) -> None:
+        payload = self.read_json()
+        process_name = str(payload.get("processName", "")).strip()
+        job_id = str(payload.get("jobId", "")).strip()
+        if not process_name:
+            self.send_json({"error": "Process name is required."}, status=400)
+            return
+
+        sql = process_detail_sql(process_name, job_id)
+
+        def action(settings: ConnectionSettings) -> dict[str, Any]:
+            return execute_query(settings, sql)
+
+        self.handle_sql_action(action, payload=payload)
+
+    def handle_process_step_sql_objects(self) -> None:
+        payload = self.read_json()
+        process_name = str(payload.get("processName", "")).strip()
+        job_id = str(payload.get("jobId", "")).strip()
+        step_order = int(payload.get("stepOrder", 0) or 0)
+        if not process_name or step_order <= 0:
+            self.send_json({"error": "Process name and step order are required."}, status=400)
+            return
+
+        sql = process_step_sql_objects_sql(process_name, step_order, job_id)
 
         def action(settings: ConnectionSettings) -> dict[str, Any]:
             return execute_query(settings, sql)
@@ -371,4 +408,475 @@ SELECT
     referenced_server_name,
     is_table_reference
 FROM referenced_objects;
+"""
+
+
+def uniqueidentifier_literal(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return "NULL"
+    return "TRY_CONVERT(uniqueidentifier, " + sql_literal(stripped) + ")"
+
+
+def process_detail_sql(process_name: str, job_id: str = "") -> str:
+    process_value = sql_literal(process_name)
+    job_id_value = uniqueidentifier_literal(job_id)
+    return f"""
+DECLARE @process_name sysname = {process_value};
+DECLARE @job_id uniqueidentifier = {job_id_value};
+DECLARE @steps_error nvarchar(4000) = NULL;
+
+IF @job_id IS NULL
+BEGIN
+    SELECT @job_id = job_id
+    FROM msdb.dbo.sysjobs
+    WHERE name = @process_name;
+END;
+
+SELECT
+    j.name AS process_name,
+    j.job_id,
+    CASE WHEN j.enabled = 1 THEN 'Enabled' ELSE 'Disabled' END AS process_status,
+    SUSER_SNAME(j.owner_sid) AS owner_name,
+    c.name AS category_name,
+    j.description,
+    CONVERT(varchar(16), j.date_created, 120) AS create_date,
+    CONVERT(varchar(16), j.date_modified, 120) AS modify_date
+FROM msdb.dbo.sysjobs AS j
+LEFT JOIN msdb.dbo.syscategories AS c
+    ON c.category_id = j.category_id
+WHERE j.job_id = @job_id
+   OR (@job_id IS NULL AND j.name = @process_name);
+
+BEGIN TRY
+    CREATE TABLE #step_raw (
+        step_id int,
+        step_name sysname,
+        subsystem nvarchar(40),
+        command nvarchar(max),
+        flags int,
+        cmdexec_success_code int,
+        on_success_action tinyint,
+        on_success_step_id int,
+        on_fail_action tinyint,
+        on_fail_step_id int,
+        server sysname NULL,
+        database_name sysname NULL,
+        database_user_name sysname NULL,
+        retry_attempts int,
+        retry_interval int,
+        os_run_priority int,
+        output_file_name nvarchar(200) NULL,
+        last_run_outcome int,
+        last_run_duration int,
+        last_run_retries int,
+        last_run_date int,
+        last_run_time int,
+        proxy_id int NULL
+    );
+
+    CREATE TABLE #job_step_raw (
+        step_id int,
+        step_name sysname,
+        subsystem nvarchar(40),
+        command nvarchar(3200),
+        flags nvarchar(4000),
+        cmdexec_success_code int,
+        on_success_action nvarchar(4000),
+        on_success_step_id int,
+        on_fail_action nvarchar(4000),
+        on_fail_step_id int,
+        server sysname NULL,
+        database_name sysname NULL,
+        database_user_name sysname NULL,
+        retry_attempts int,
+        retry_interval int,
+        os_run_priority varchar(4000),
+        output_file_name varchar(200),
+        last_run_outcome int,
+        last_run_duration int,
+        last_run_retries int,
+        last_run_date int,
+        last_run_time int,
+        proxy_id int NULL
+    );
+
+    BEGIN TRY
+        INSERT INTO #step_raw
+        EXEC msdb.dbo.sp_help_jobstep @job_id = @job_id;
+    END TRY
+    BEGIN CATCH
+        BEGIN TRY
+            INSERT INTO #step_raw
+            EXEC msdb.dbo.sp_help_jobstep @job_name = @process_name;
+        END TRY
+        BEGIN CATCH
+            BEGIN TRY
+                INSERT INTO #job_step_raw
+                EXEC msdb.dbo.sp_help_job @job_id = @job_id, @job_aspect = 'STEPS';
+
+                INSERT INTO #step_raw (
+                    step_id,
+                    step_name,
+                    subsystem,
+                    command,
+                    flags,
+                    cmdexec_success_code,
+                    on_success_action,
+                    on_success_step_id,
+                    on_fail_action,
+                    on_fail_step_id,
+                    server,
+                    database_name,
+                    database_user_name,
+                    retry_attempts,
+                    retry_interval,
+                    os_run_priority,
+                    output_file_name,
+                    last_run_outcome,
+                    last_run_duration,
+                    last_run_retries,
+                    last_run_date,
+                    last_run_time,
+                    proxy_id
+                )
+                SELECT
+                    step_id,
+                    step_name,
+                    subsystem,
+                    command,
+                    TRY_CONVERT(int, flags),
+                    cmdexec_success_code,
+                    TRY_CONVERT(tinyint, LEFT(on_success_action, 1)),
+                    on_success_step_id,
+                    TRY_CONVERT(tinyint, LEFT(on_fail_action, 1)),
+                    on_fail_step_id,
+                    server,
+                    database_name,
+                    database_user_name,
+                    retry_attempts,
+                    retry_interval,
+                    TRY_CONVERT(int, os_run_priority),
+                    output_file_name,
+                    last_run_outcome,
+                    last_run_duration,
+                    last_run_retries,
+                    last_run_date,
+                    last_run_time,
+                    proxy_id
+                FROM #job_step_raw;
+            END TRY
+            BEGIN CATCH
+                SET @steps_error = CONCAT('Steps are not available for this login through msdb SQL Agent procedures. Last error: ', ERROR_MESSAGE());
+            END CATCH;
+        END CATCH;
+    END CATCH;
+
+    IF @steps_error IS NOT NULL
+    BEGIN
+        SELECT
+            @steps_error AS step_order,
+            CAST(NULL AS sysname) AS step_name,
+            CAST(NULL AS nvarchar(40)) AS subsystem,
+            CAST(NULL AS sysname) AS database_name,
+            CAST(NULL AS varchar(20)) AS command_type,
+            CAST(NULL AS varchar(20)) AS on_success_action,
+            CAST(NULL AS varchar(20)) AS on_fail_action,
+            CAST(NULL AS int) AS retry_attempts,
+            CAST(NULL AS int) AS retry_interval,
+            CAST(NULL AS int) AS command_length,
+            CAST(NULL AS nvarchar(500)) AS command_preview;
+    END
+    ELSE
+    BEGIN
+        SELECT
+            step_id AS step_order,
+            step_name,
+            subsystem,
+            database_name,
+            CASE
+                WHEN subsystem = 'TSQL' AND (LOWER(command) LIKE '%exec %' OR LOWER(command) LIKE '%execute %') THEN 'Procedure call'
+                WHEN subsystem = 'TSQL' THEN 'T-SQL batch'
+                ELSE subsystem
+            END AS command_type,
+            CASE on_success_action
+                WHEN 1 THEN 'Quit with success'
+                WHEN 2 THEN 'Quit with failure'
+                WHEN 3 THEN 'Go to next step'
+                WHEN 4 THEN 'Go to step'
+                ELSE 'Unknown'
+            END AS on_success_action,
+            CASE on_fail_action
+                WHEN 1 THEN 'Quit with success'
+                WHEN 2 THEN 'Quit with failure'
+                WHEN 3 THEN 'Go to next step'
+                WHEN 4 THEN 'Go to step'
+                ELSE 'Unknown'
+            END AS on_fail_action,
+            retry_attempts,
+            retry_interval,
+            LEN(command) AS command_length,
+            LEFT(REPLACE(REPLACE(command, CHAR(13), ' '), CHAR(10), ' '), 500) AS command_preview
+        FROM #step_raw
+        ORDER BY step_id;
+    END;
+END TRY
+BEGIN CATCH
+    SELECT
+        ERROR_MESSAGE() AS step_order,
+        CAST(NULL AS sysname) AS step_name,
+        CAST(NULL AS nvarchar(40)) AS subsystem,
+        CAST(NULL AS sysname) AS database_name,
+        CAST(NULL AS varchar(20)) AS command_type,
+        CAST(NULL AS varchar(20)) AS on_success_action,
+        CAST(NULL AS varchar(20)) AS on_fail_action,
+        CAST(NULL AS int) AS retry_attempts,
+        CAST(NULL AS int) AS retry_interval,
+        CAST(NULL AS int) AS command_length,
+        CAST(NULL AS nvarchar(500)) AS command_preview;
+END CATCH;
+
+BEGIN TRY
+    SELECT TOP (100)
+        CASE h.run_status
+            WHEN 0 THEN 'Failed'
+            WHEN 1 THEN 'Succeeded'
+            WHEN 2 THEN 'Retry'
+            WHEN 3 THEN 'Canceled'
+            WHEN 4 THEN 'In Progress'
+            ELSE 'Unknown'
+        END AS run_status,
+        STUFF(STUFF(CONVERT(char(8), h.run_date), 5, 0, '-'), 8, 0, '-')
+            + ' '
+            + STUFF(LEFT(RIGHT('000000' + CONVERT(varchar(6), h.run_time), 6), 4), 3, 0, ':') AS run_datetime,
+        h.run_duration,
+        h.message
+    FROM msdb.dbo.sysjobhistory AS h
+    INNER JOIN msdb.dbo.sysjobs AS j
+        ON j.job_id = h.job_id
+    WHERE j.job_id = @job_id
+      AND h.step_id = 0
+    ORDER BY h.run_date DESC, h.run_time DESC, h.instance_id DESC;
+END TRY
+BEGIN CATCH
+    SELECT
+        ERROR_MESSAGE() AS run_status,
+        CAST(NULL AS varchar(16)) AS run_datetime,
+        CAST(NULL AS int) AS run_duration,
+        CAST(NULL AS nvarchar(4000)) AS message;
+END CATCH;
+"""
+
+
+def process_step_sql_objects_sql(process_name: str, step_order: int, job_id: str = "") -> str:
+    process_value = sql_literal(process_name)
+    job_id_value = uniqueidentifier_literal(job_id)
+    return f"""
+DECLARE @process_name sysname = {process_value};
+DECLARE @job_id uniqueidentifier = {job_id_value};
+DECLARE @step_order int = {step_order};
+
+IF @job_id IS NULL
+BEGIN
+    SELECT @job_id = job_id
+    FROM msdb.dbo.sysjobs
+    WHERE name = @process_name;
+END;
+
+BEGIN TRY
+    CREATE TABLE #step_raw (
+        step_id int,
+        step_name sysname,
+        subsystem nvarchar(40),
+        command nvarchar(max),
+        flags int,
+        cmdexec_success_code int,
+        on_success_action tinyint,
+        on_success_step_id int,
+        on_fail_action tinyint,
+        on_fail_step_id int,
+        server sysname NULL,
+        database_name sysname NULL,
+        database_user_name sysname NULL,
+        retry_attempts int,
+        retry_interval int,
+        os_run_priority int,
+        output_file_name nvarchar(200) NULL,
+        last_run_outcome int,
+        last_run_duration int,
+        last_run_retries int,
+        last_run_date int,
+        last_run_time int,
+        proxy_id int NULL
+    );
+
+    CREATE TABLE #job_step_raw (
+        step_id int,
+        step_name sysname,
+        subsystem nvarchar(40),
+        command nvarchar(3200),
+        flags nvarchar(4000),
+        cmdexec_success_code int,
+        on_success_action nvarchar(4000),
+        on_success_step_id int,
+        on_fail_action nvarchar(4000),
+        on_fail_step_id int,
+        server sysname NULL,
+        database_name sysname NULL,
+        database_user_name sysname NULL,
+        retry_attempts int,
+        retry_interval int,
+        os_run_priority varchar(4000),
+        output_file_name varchar(200),
+        last_run_outcome int,
+        last_run_duration int,
+        last_run_retries int,
+        last_run_date int,
+        last_run_time int,
+        proxy_id int NULL
+    );
+
+    BEGIN TRY
+        INSERT INTO #step_raw
+        EXEC msdb.dbo.sp_help_jobstep @job_id = @job_id, @step_id = @step_order;
+    END TRY
+    BEGIN CATCH
+        BEGIN TRY
+            INSERT INTO #step_raw
+            EXEC msdb.dbo.sp_help_jobstep @job_name = @process_name, @step_id = @step_order;
+        END TRY
+        BEGIN CATCH
+            BEGIN TRY
+                INSERT INTO #job_step_raw
+                EXEC msdb.dbo.sp_help_job @job_id = @job_id, @job_aspect = 'STEPS';
+
+                INSERT INTO #step_raw (
+                    step_id,
+                    step_name,
+                    subsystem,
+                    command,
+                    flags,
+                    cmdexec_success_code,
+                    on_success_action,
+                    on_success_step_id,
+                    on_fail_action,
+                    on_fail_step_id,
+                    server,
+                    database_name,
+                    database_user_name,
+                    retry_attempts,
+                    retry_interval,
+                    os_run_priority,
+                    output_file_name,
+                    last_run_outcome,
+                    last_run_duration,
+                    last_run_retries,
+                    last_run_date,
+                    last_run_time,
+                    proxy_id
+                )
+                SELECT
+                    step_id,
+                    step_name,
+                    subsystem,
+                    command,
+                    TRY_CONVERT(int, flags),
+                    cmdexec_success_code,
+                    TRY_CONVERT(tinyint, LEFT(on_success_action, 1)),
+                    on_success_step_id,
+                    TRY_CONVERT(tinyint, LEFT(on_fail_action, 1)),
+                    on_fail_step_id,
+                    server,
+                    database_name,
+                    database_user_name,
+                    retry_attempts,
+                    retry_interval,
+                    TRY_CONVERT(int, os_run_priority),
+                    output_file_name,
+                    last_run_outcome,
+                    last_run_duration,
+                    last_run_retries,
+                    last_run_date,
+                    last_run_time,
+                    proxy_id
+                FROM #job_step_raw
+                WHERE step_id = @step_order;
+            END TRY
+            BEGIN CATCH
+                SELECT
+                    CONCAT('Step SQL objects are not available for this login through msdb SQL Agent procedures. Last error: ', ERROR_MESSAGE()) AS step_order,
+                    CAST(NULL AS sysname) AS step_name,
+                    CAST(NULL AS sysname) AS database_name,
+                    CAST(NULL AS varchar(20)) AS object_type,
+                    CAST(NULL AS sysname) AS referenced_database,
+                    CAST(NULL AS sysname) AS schema_name,
+                    CAST(NULL AS sysname) AS object_name,
+                    CAST(NULL AS nvarchar(512)) AS detected_object_text,
+                    CAST(NULL AS varchar(40)) AS detection_method,
+                    CAST(NULL AS varchar(10)) AS confidence,
+                    CAST(NULL AS nvarchar(500)) AS command_preview;
+                RETURN;
+            END CATCH;
+        END CATCH;
+    END CATCH;
+
+    WITH step_commands AS (
+        SELECT
+            step_id,
+            step_name,
+            database_name,
+            command,
+            CASE
+                WHEN PATINDEX('%execute %', LOWER(command)) > 0 THEN PATINDEX('%execute %', LOWER(command)) + 8
+                WHEN PATINDEX('%exec %', LOWER(command)) > 0 THEN PATINDEX('%exec %', LOWER(command)) + 5
+                ELSE 0
+            END AS object_start
+        FROM #step_raw
+        WHERE subsystem = 'TSQL'
+    ),
+    detected AS (
+        SELECT
+            step_id,
+            step_name,
+            database_name,
+            LTRIM(RTRIM(
+                REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                    LEFT(SUBSTRING(command, object_start, 4000), CHARINDEX(' ', SUBSTRING(command, object_start, 4000) + ' ') - 1),
+                    '[', ''), ']', ''), ';', ''), CHAR(9), ''), CHAR(10), '')
+            )) AS detected_object,
+            LEFT(REPLACE(REPLACE(command, CHAR(13), ' '), CHAR(10), ' '), 500) AS command_preview
+        FROM step_commands
+        WHERE object_start > 0
+    )
+    SELECT
+        step_id AS step_order,
+        step_name,
+        database_name,
+        'Procedure' AS object_type,
+        PARSENAME(detected_object, 3) AS referenced_database,
+        PARSENAME(detected_object, 2) AS schema_name,
+        PARSENAME(detected_object, 1) AS object_name,
+        detected_object AS detected_object_text,
+        'sp_help_jobstep + EXEC keyword' AS detection_method,
+        CASE WHEN PARSENAME(detected_object, 2) IS NOT NULL THEN 'High' ELSE 'Medium' END AS confidence,
+        command_preview
+    FROM detected
+    WHERE detected_object IS NOT NULL
+      AND detected_object <> ''
+      AND detected_object NOT LIKE '@%';
+END TRY
+BEGIN CATCH
+    SELECT
+        ERROR_MESSAGE() AS step_order,
+        CAST(NULL AS sysname) AS step_name,
+        CAST(NULL AS sysname) AS database_name,
+        CAST(NULL AS varchar(20)) AS object_type,
+        CAST(NULL AS sysname) AS referenced_database,
+        CAST(NULL AS sysname) AS schema_name,
+        CAST(NULL AS sysname) AS object_name,
+        CAST(NULL AS nvarchar(512)) AS detected_object_text,
+        CAST(NULL AS varchar(40)) AS detection_method,
+        CAST(NULL AS varchar(10)) AS confidence,
+        CAST(NULL AS nvarchar(500)) AS command_preview;
+END CATCH;
 """

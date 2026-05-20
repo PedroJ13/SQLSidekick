@@ -1,26 +1,41 @@
--- name: sql_agent_job_steps
--- title: SQL Agent job steps
--- description: Full inventory of SQL Server Agent job steps without full command text.
+-- name: process_steps
+-- title: Steps
+-- description: Full process step inventory based on SQL Agent job steps.
 BEGIN TRY
     SELECT
-        j.name AS job_name,
-        js.step_id,
+        j.name AS process_name,
+        j.job_id,
+        js.step_id AS step_order,
         js.step_name,
         js.subsystem,
-        js.database_name,
+        js.database_name AS database_name,
         js.database_user_name,
-        js.proxy_id,
-        js.cmdexec_success_code,
-        js.on_success_action,
+        CASE
+            WHEN js.subsystem = 'TSQL' AND (LOWER(js.command) LIKE '%exec %' OR LOWER(js.command) LIKE '%execute %') THEN 'Procedure call'
+            WHEN js.subsystem = 'TSQL' THEN 'T-SQL batch'
+            ELSE js.subsystem
+        END AS command_type,
+        CASE js.on_success_action
+            WHEN 1 THEN 'Quit with success'
+            WHEN 2 THEN 'Quit with failure'
+            WHEN 3 THEN 'Go to next step'
+            WHEN 4 THEN 'Go to step'
+            ELSE 'Unknown'
+        END AS on_success_action,
         js.on_success_step_id,
-        js.on_fail_action,
+        CASE js.on_fail_action
+            WHEN 1 THEN 'Quit with success'
+            WHEN 2 THEN 'Quit with failure'
+            WHEN 3 THEN 'Go to next step'
+            WHEN 4 THEN 'Go to step'
+            ELSE 'Unknown'
+        END AS on_fail_action,
         js.on_fail_step_id,
         js.retry_attempts,
         js.retry_interval,
-        js.os_run_priority,
         js.output_file_name,
         LEN(js.command) AS command_length,
-        LEFT(REPLACE(REPLACE(js.command, CHAR(13), ' '), CHAR(10), ' '), 300) AS command_preview
+        LEFT(REPLACE(REPLACE(js.command, CHAR(13), ' '), CHAR(10), ' '), 500) AS command_preview
     FROM msdb.dbo.sysjobsteps AS js
     INNER JOIN msdb.dbo.sysjobs AS j
         ON j.job_id = js.job_id
@@ -54,23 +69,21 @@ BEGIN CATCH
             proxy_id int NULL
         );
 
-        CREATE TABLE #job_steps (
-            job_name sysname,
+        CREATE TABLE #process_steps (
+            process_name sysname,
+            job_id uniqueidentifier,
             step_id int,
             step_name sysname,
             subsystem nvarchar(40),
             command nvarchar(max),
-            database_name sysname NULL,
-            database_user_name sysname NULL,
-            proxy_id int NULL,
-            cmdexec_success_code int,
             on_success_action tinyint,
             on_success_step_id int,
             on_fail_action tinyint,
             on_fail_step_id int,
+            database_name sysname NULL,
+            database_user_name sysname NULL,
             retry_attempts int,
             retry_interval int,
-            os_run_priority int,
             output_file_name nvarchar(200) NULL
         );
 
@@ -92,42 +105,38 @@ BEGIN CATCH
                 INSERT INTO #step_raw
                 EXEC msdb.dbo.sp_help_jobstep @job_id = @job_id;
 
-                INSERT INTO #job_steps (
-                    job_name,
+                INSERT INTO #process_steps (
+                    process_name,
+                    job_id,
                     step_id,
                     step_name,
                     subsystem,
                     command,
-                    database_name,
-                    database_user_name,
-                    proxy_id,
-                    cmdexec_success_code,
                     on_success_action,
                     on_success_step_id,
                     on_fail_action,
                     on_fail_step_id,
+                    database_name,
+                    database_user_name,
                     retry_attempts,
                     retry_interval,
-                    os_run_priority,
                     output_file_name
                 )
                 SELECT
                     @job_name,
+                    @job_id,
                     step_id,
                     step_name,
                     subsystem,
                     command,
-                    database_name,
-                    database_user_name,
-                    proxy_id,
-                    cmdexec_success_code,
                     on_success_action,
                     on_success_step_id,
                     on_fail_action,
                     on_fail_step_id,
+                    database_name,
+                    database_user_name,
                     retry_attempts,
                     retry_interval,
-                    os_run_priority,
                     output_file_name
                 FROM #step_raw;
             END TRY
@@ -142,46 +151,60 @@ BEGIN CATCH
         DEALLOCATE job_cursor;
 
         SELECT
-            job_name,
-            step_id,
+            process_name,
+            job_id,
+            step_id AS step_order,
             step_name,
             subsystem,
             database_name,
             database_user_name,
-            proxy_id,
-            cmdexec_success_code,
-            on_success_action,
+            CASE
+                WHEN subsystem = 'TSQL' AND (LOWER(command) LIKE '%exec %' OR LOWER(command) LIKE '%execute %') THEN 'Procedure call'
+                WHEN subsystem = 'TSQL' THEN 'T-SQL batch'
+                ELSE subsystem
+            END AS command_type,
+            CASE on_success_action
+                WHEN 1 THEN 'Quit with success'
+                WHEN 2 THEN 'Quit with failure'
+                WHEN 3 THEN 'Go to next step'
+                WHEN 4 THEN 'Go to step'
+                ELSE 'Unknown'
+            END AS on_success_action,
             on_success_step_id,
-            on_fail_action,
+            CASE on_fail_action
+                WHEN 1 THEN 'Quit with success'
+                WHEN 2 THEN 'Quit with failure'
+                WHEN 3 THEN 'Go to next step'
+                WHEN 4 THEN 'Go to step'
+                ELSE 'Unknown'
+            END AS on_fail_action,
             on_fail_step_id,
             retry_attempts,
             retry_interval,
-            os_run_priority,
             output_file_name,
             LEN(command) AS command_length,
-            LEFT(REPLACE(REPLACE(command, CHAR(13), ' '), CHAR(10), ' '), 300) AS command_preview
-        FROM #job_steps
-        ORDER BY job_name, step_id;
+            LEFT(REPLACE(REPLACE(command, CHAR(13), ' '), CHAR(10), ' '), 500) AS command_preview
+        FROM #process_steps
+        ORDER BY process_name, step_id;
     END TRY
     BEGIN CATCH
         SELECT
-            ERROR_MESSAGE() AS job_name,
-            CAST(NULL AS int) AS step_id,
+            ERROR_MESSAGE() AS process_name,
+            CAST(NULL AS uniqueidentifier) AS job_id,
+            CAST(NULL AS int) AS step_order,
             CAST(NULL AS sysname) AS step_name,
             CAST(NULL AS nvarchar(40)) AS subsystem,
             CAST(NULL AS sysname) AS database_name,
             CAST(NULL AS sysname) AS database_user_name,
-            CAST(NULL AS int) AS proxy_id,
-            CAST(NULL AS int) AS cmdexec_success_code,
-            CAST(NULL AS int) AS on_success_action,
+            CAST(NULL AS varchar(20)) AS command_type,
+            CAST(NULL AS varchar(20)) AS on_success_action,
             CAST(NULL AS int) AS on_success_step_id,
-            CAST(NULL AS int) AS on_fail_action,
+            CAST(NULL AS varchar(20)) AS on_fail_action,
             CAST(NULL AS int) AS on_fail_step_id,
             CAST(NULL AS int) AS retry_attempts,
             CAST(NULL AS int) AS retry_interval,
-            CAST(NULL AS int) AS os_run_priority,
             CAST(NULL AS nvarchar(200)) AS output_file_name,
             CAST(NULL AS int) AS command_length,
-            CAST(NULL AS nvarchar(300)) AS command_preview;
+            CAST(NULL AS nvarchar(500)) AS command_preview;
     END CATCH;
 END CATCH;

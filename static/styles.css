@@ -1039,6 +1039,17 @@ dialog {
   line-height: 1.4;
 }
 
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.settings-grid-wide {
+  grid-column: 1 / -1;
+}
+
 .segmented-control {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1105,7 +1116,8 @@ dialog {
   background: #fff;
 }
 
-.detail-tab {
+.detail-tab,
+.process-detail-tab {
   min-height: 36px;
   padding: 7px 12px;
   background: #fff;
@@ -1114,7 +1126,8 @@ dialog {
   font-weight: 700;
 }
 
-.detail-tab.active {
+.detail-tab.active,
+.process-detail-tab.active {
   background: var(--brand);
   color: #fff;
   border-color: var(--brand);

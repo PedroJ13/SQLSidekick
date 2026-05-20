@@ -33,13 +33,19 @@ const DOCUMENTATION_GROUPS = [
     title: "Security",
     names: ["database_principals", "database_roles", "database_role_members", "database_permissions"],
   },
+  {
+    title: "Jobs",
+    names: ["process_inventory", "process_steps", "process_recent_runs"],
+  },
   { title: "Analysis", names: ["review_findings", "index_usage", "index_physical_stats", "missing_indexes", "statistics"] },
 ];
 
-const PROCESS_GROUPS = [
+const PROCESS_GROUPS = [];
+
+const LINEAGE_GROUPS = [
   {
-    title: "SQL Agent Jobs",
-    names: ["sql_agent_jobs", "sql_agent_job_steps", "sql_agent_job_schedules", "sql_agent_job_history"],
+    title: "Lineage",
+    names: ["object_references", "table_usage", "process_lineage"],
   },
 ];
 
@@ -58,8 +64,8 @@ const NAV_AREAS = [
     title: "Processes",
     pill: "Processes module",
     heading: "Processes",
-    emptyTitle: "Choose a process section",
-    emptyDescription: "Start with SQL Agent jobs, steps, schedules, and history as the first layer of process documentation.",
+    emptyTitle: "Processes are next",
+    emptyDescription: "This area will evolve into process maps, ownership, lineage, and impact analysis after the job documentation is stable.",
     groups: PROCESS_GROUPS,
   },
   {
@@ -67,9 +73,9 @@ const NAV_AREAS = [
     title: "Lineage",
     pill: "Lineage module",
     heading: "Lineage",
-    emptyTitle: "Lineage is next",
-    emptyDescription: "This area will show upstream, downstream, and impact views once process relationships are available.",
-    groups: [],
+    emptyTitle: "Choose a lineage section",
+    emptyDescription: "Review object dependencies, table usage, and initial process lineage before moving to graph views.",
+    groups: LINEAGE_GROUPS,
   },
   {
     id: "health",
@@ -163,6 +169,7 @@ const CARD_GROUPS = {
 const CONNECTION_DRAFT_KEY = "sqlsidekick.connectionDraft";
 const SCRIPT_VERSION_KEY = "sqlsidekick.scriptVersion";
 const AUTO_ALERTS_KEY = "sqlsidekick.autoAlerts";
+const AGENT_CONNECTION_KEY = "sqlsidekick.agentConnection";
 const TABLE_PAGE_SIZE = 50;
 
 const GROUP_CATEGORY_SLUGS = {
@@ -174,6 +181,8 @@ const GROUP_CATEGORY_SLUGS = {
   "SQL Code": "code",
   "DB Users / Roles": "security",
   "SQL Agent Jobs": "jobs",
+  "Process Documentation": "processes",
+  Jobs: "processes",
   Analysis: "analysis",
   Operations: "operations",
   Additional: "additional",
@@ -197,6 +206,7 @@ const state = {
   failedQueries: new Map(),
   scriptVersion: loadScriptVersion(),
   autoAlerts: loadAutoAlerts(),
+  agentConnection: loadAgentConnection(),
   alertsSweepId: 0,
   alertsByCategory: {},
   alerts: {
@@ -258,6 +268,15 @@ const els = {
   codeDetailTitle: document.querySelector("#codeDetailTitle"),
   codeDetailBody: document.querySelector("#codeDetailBody"),
   closeCodeDetail: document.querySelector("#closeCodeDetail"),
+  processDetailDialog: document.querySelector("#processDetailDialog"),
+  processDetailTitle: document.querySelector("#processDetailTitle"),
+  processDetailBody: document.querySelector("#processDetailBody"),
+  closeProcessDetail: document.querySelector("#closeProcessDetail"),
+  processDetailTabs: document.querySelectorAll(".process-detail-tab"),
+  stepObjectsDialog: document.querySelector("#stepObjectsDialog"),
+  stepObjectsTitle: document.querySelector("#stepObjectsTitle"),
+  stepObjectsBody: document.querySelector("#stepObjectsBody"),
+  closeStepObjects: document.querySelector("#closeStepObjects"),
   alertsDialog: document.querySelector("#alertsDialog"),
   alertsTitle: document.querySelector("#alertsTitle"),
   alertsBody: document.querySelector("#alertsBody"),
@@ -266,6 +285,10 @@ const els = {
   closeSettings: document.querySelector("#closeSettings"),
   scriptVersionInputs: document.querySelectorAll('input[name="scriptVersion"]'),
   autoAlertsInput: document.querySelector("#autoAlerts"),
+  agentCredentialsEnabled: document.querySelector("#agentCredentialsEnabled"),
+  agentDatabase: document.querySelector("#agentDatabase"),
+  agentUsername: document.querySelector("#agentUsername"),
+  agentPassword: document.querySelector("#agentPassword"),
 };
 
 function getConnectionPayload() {
@@ -316,6 +339,30 @@ function loadAutoAlerts() {
   return localStorage.getItem(AUTO_ALERTS_KEY) === "true";
 }
 
+function loadAgentConnection() {
+  try {
+    const raw = localStorage.getItem(AGENT_CONNECTION_KEY);
+    if (!raw) {
+      return { enabled: false, database: "msdb", username: "", password: "" };
+    }
+    return { enabled: false, database: "msdb", username: "", password: "", ...JSON.parse(raw) };
+  } catch {
+    localStorage.removeItem(AGENT_CONNECTION_KEY);
+    return { enabled: false, database: "msdb", username: "", password: "" };
+  }
+}
+
+function saveAgentConnection() {
+  state.agentConnection = {
+    enabled: Boolean(els.agentCredentialsEnabled?.checked),
+    database: String(els.agentDatabase?.value || "msdb").trim() || "msdb",
+    username: String(els.agentUsername?.value || "").trim(),
+    password: String(els.agentPassword?.value || ""),
+  };
+  localStorage.setItem(AGENT_CONNECTION_KEY, JSON.stringify(state.agentConnection));
+  updateAgentConnectionInputs();
+}
+
 function saveAutoAlerts(enabled) {
   state.autoAlerts = Boolean(enabled);
   localStorage.setItem(AUTO_ALERTS_KEY, state.autoAlerts ? "true" : "false");
@@ -341,6 +388,43 @@ function updateAutoAlertsInput() {
   if (els.autoAlertsInput) {
     els.autoAlertsInput.checked = state.autoAlerts;
   }
+}
+
+function updateAgentConnectionInputs() {
+  if (!els.agentCredentialsEnabled) return;
+  const agent = state.agentConnection || {};
+  els.agentCredentialsEnabled.checked = Boolean(agent.enabled);
+  els.agentDatabase.value = agent.database || "msdb";
+  els.agentUsername.value = agent.username || "";
+  els.agentPassword.value = agent.password || "";
+  const enabled = Boolean(agent.enabled);
+  els.agentDatabase.disabled = !enabled;
+  els.agentUsername.disabled = !enabled;
+  els.agentPassword.disabled = !enabled;
+}
+
+function getQueryConnection(useAgent = false) {
+  if (!shouldUseAgentConnection()) {
+    return state.connection;
+  }
+  if (!useAgent) {
+    return state.connection;
+  }
+  return {
+    ...state.connection,
+    database: state.agentConnection.database || "msdb",
+    authType: "sql",
+    username: state.agentConnection.username || "",
+    password: state.agentConnection.password || "",
+  };
+}
+
+function shouldUseAgentConnection() {
+  return (
+    state.agentConnection?.enabled &&
+    state.agentConnection?.username &&
+    state.agentConnection?.password
+  );
 }
 
 async function api(path, options = {}) {
@@ -454,19 +538,6 @@ function renderQueryMenu() {
     }
   });
 
-  const uncategorized = area.id === "documentation" ? state.queries.filter((query) => !usedNames.has(query.name)) : [];
-  if (uncategorized.length > 0) {
-    const details = document.createElement("details");
-    details.className = "menu-group";
-    details.open = true;
-    const summary = document.createElement("summary");
-    summary.textContent = "Additional";
-    const items = document.createElement("div");
-    items.className = "menu-items";
-    uncategorized.forEach((query) => items.appendChild(createQueryButton(query, "Additional")));
-      details.append(summary, items);
-      els.queryList.appendChild(details);
-  }
   if (els.queryList.children.length === 0) {
     const empty = document.createElement("div");
     empty.className = "module-empty";
@@ -834,7 +905,7 @@ async function runActiveQuery() {
     const payload = await api("/api/run-query", {
       method: "POST",
       body: JSON.stringify({
-        connection: state.connection,
+        connection: getQueryConnection(),
         queryName: state.activeQuery.name,
         scriptVersion: state.scriptVersion,
       }),
@@ -1014,14 +1085,16 @@ function renderTable() {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "row-detail-button";
-      button.title = isTablesQuery() ? "Open table detail" : "Open SQL code detail";
+      button.title = getRowDetailTitle();
       button.setAttribute("aria-label", button.title);
       button.textContent = "i";
       button.addEventListener("click", () => {
         if (isTablesQuery()) {
           openTableDetail(row);
-        } else {
+        } else if (isCodeQuery()) {
           openCodeDetail(row);
+        } else if (isProcessInventoryQuery()) {
+          openProcessDetail(row);
         }
       });
       actionTd.appendChild(button);
@@ -1072,6 +1145,13 @@ function getDefaultFilterColumn() {
     sql_agent_job_steps: ["job_name", "step_name"],
     sql_agent_job_schedules: ["job_name", "schedule_name"],
     sql_agent_job_history: ["job_name"],
+    process_inventory: ["process_name"],
+    process_steps: ["process_name", "step_name"],
+    process_sql_objects: ["process_name", "object_name", "schema_name"],
+    process_recent_runs: ["process_name", "run_status"],
+    object_references: ["source_object", "target_object", "source_schema", "target_schema"],
+    table_usage: ["table_name", "used_by_object", "table_schema"],
+    process_lineage: ["process_name", "called_object_name", "referenced_object"],
   };
   const candidates = preferredByQuery[state.activeQuery?.name] || [];
   return candidates.find((column) => state.columns.includes(column)) || inferNameColumn();
@@ -1099,8 +1179,19 @@ function isCodeQuery() {
   return ["views", "procedures", "functions", "triggers"].includes(state.activeQuery?.name);
 }
 
+function isProcessInventoryQuery() {
+  return state.activeQuery?.name === "process_inventory";
+}
+
 function hasRowDetail() {
-  return isTablesQuery() || isCodeQuery();
+  return isTablesQuery() || isCodeQuery() || isProcessInventoryQuery();
+}
+
+function getRowDetailTitle() {
+  if (isTablesQuery()) return "Open table detail";
+  if (isCodeQuery()) return "Open SQL code detail";
+  if (isProcessInventoryQuery()) return "Open process detail";
+  return "Open detail";
 }
 
 async function openTableDetail(row) {
@@ -1170,6 +1261,94 @@ async function openCodeDetail(row) {
   }
 }
 
+async function openProcessDetail(row) {
+  const processName = row.process_name;
+  if (!processName || !state.connection) return;
+
+  els.processDetailTitle.textContent = processName;
+  setActiveProcessDetailTab("overview");
+  els.processDetailBody.innerHTML = `
+    <div class="detail-loading">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <span>Loading process detail</span>
+    </div>
+  `;
+  els.processDetailDialog.showModal();
+
+  try {
+    const primaryPayload = await api("/api/process-detail", {
+      method: "POST",
+      body: JSON.stringify({
+        connection: getQueryConnection(),
+        processName,
+        jobId: row.job_id || "",
+      }),
+    });
+    let stepsResultSet = primaryPayload.resultSets?.[1] || { columns: [], rows: [] };
+
+    if (shouldUseAgentConnection()) {
+      try {
+        const agentPayload = await api("/api/process-detail", {
+          method: "POST",
+          body: JSON.stringify({
+            connection: getQueryConnection(true),
+            processName,
+            jobId: row.job_id || "",
+          }),
+        });
+        stepsResultSet = agentPayload.resultSets?.[1] || stepsResultSet;
+      } catch {
+        stepsResultSet = primaryPayload.resultSets?.[1] || { columns: [], rows: [] };
+      }
+    }
+
+    const detail = {
+      overview: primaryPayload.resultSets?.[0] || { columns: [], rows: [] },
+      steps: stepsResultSet,
+      recentRuns: primaryPayload.resultSets?.[2] || { columns: [], rows: [] },
+      processName,
+      jobId: row.job_id || "",
+    };
+    els.processDetailDialog.dataset.detail = JSON.stringify(detail);
+    renderProcessDetailTab("overview");
+  } catch (error) {
+    els.processDetailBody.innerHTML = `<div class="alert-error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function openProcessStepSqlObjects(row) {
+  const detail = JSON.parse(els.processDetailDialog.dataset.detail || "{}");
+  const processName = detail.processName;
+  const jobId = detail.jobId || "";
+  const stepOrder = Number(row.step_order || row.step_id || 0);
+  if (!processName || !stepOrder || !state.connection) return;
+
+  els.stepObjectsTitle.textContent = `${processName} - Step ${stepOrder}`;
+  els.stepObjectsBody.innerHTML = `
+    <div class="detail-loading">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <span>Loading SQL objects</span>
+    </div>
+  `;
+  els.stepObjectsDialog.showModal();
+
+  try {
+    const payload = await api("/api/process-step-sql-objects", {
+      method: "POST",
+      body: JSON.stringify({
+        connection: getQueryConnection(true),
+        processName,
+        jobId,
+        stepOrder,
+      }),
+    });
+    const resultSet = payload.resultSets?.[0] || { columns: [], rows: [] };
+    els.stepObjectsBody.innerHTML = renderDetailResultSet(resultSet);
+  } catch (error) {
+    els.stepObjectsBody.innerHTML = `<div class="alert-error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
 function getCodeObjectName(row) {
   const nameColumns = {
     views: "view_name",
@@ -1191,6 +1370,60 @@ function renderTableDetailTab(tabName) {
   const detail = JSON.parse(els.tableDetailDialog.dataset.detail || "{}");
   const resultSet = detail[tabName] || { columns: [], rows: [] };
   els.tableDetailBody.innerHTML = renderDetailResultSet(resultSet);
+}
+
+function setActiveProcessDetailTab(tabName) {
+  els.processDetailTabs.forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.tab === tabName);
+  });
+}
+
+function renderProcessDetailTab(tabName) {
+  setActiveProcessDetailTab(tabName);
+  const detail = JSON.parse(els.processDetailDialog.dataset.detail || "{}");
+  const resultSet = detail[tabName] || { columns: [], rows: [] };
+  els.processDetailBody.innerHTML = tabName === "steps" ? renderProcessStepsResultSet(resultSet) : renderDetailResultSet(resultSet);
+}
+
+function renderProcessStepsResultSet(resultSet) {
+  const columns = resultSet.columns || [];
+  const rows = resultSet.rows || [];
+  if (columns.length === 0) {
+    return `<div class="empty">No step columns to display.</div>`;
+  }
+  if (rows.length === 0) {
+    return `<div class="empty">No steps to display.</div>`;
+  }
+  const headers = [`<th class="row-action-header"></th>`, ...columns.map((column) => `<th>${escapeHtml(labelize(column))}</th>`)].join("");
+  const body = rows
+    .map((row, index) => {
+      const encoded = encodeURIComponent(JSON.stringify(row));
+      const cells = columns.map((column) => `<td>${escapeHtml(formatValue(row[column]))}</td>`).join("");
+      return `
+        <tr>
+          <td class="row-action-cell">
+            <button type="button" class="row-detail-button process-step-object-button" data-row="${encoded}" title="Open SQL objects" aria-label="Open SQL objects">i</button>
+          </td>
+          ${cells}
+        </tr>
+      `;
+    })
+    .join("");
+  setTimeout(() => {
+    document.querySelectorAll(".process-step-object-button").forEach((button) => {
+      button.addEventListener("click", () => {
+        openProcessStepSqlObjects(JSON.parse(decodeURIComponent(button.dataset.row || "%7B%7D")));
+      });
+    });
+  }, 0);
+  return `
+    <div class="detail-table-wrap">
+      <table class="detail-table">
+        <thead><tr>${headers}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+  `;
 }
 
 function renderDetailResultSet(resultSet) {
@@ -1339,12 +1572,18 @@ els.openAlerts.addEventListener("click", openAlertsPanel);
 els.closeAlerts.addEventListener("click", () => els.alertsDialog.close());
 els.closeTableDetail.addEventListener("click", () => els.tableDetailDialog.close());
 els.closeCodeDetail.addEventListener("click", () => els.codeDetailDialog.close());
+els.closeProcessDetail.addEventListener("click", () => els.processDetailDialog.close());
+els.closeStepObjects.addEventListener("click", () => els.stepObjectsDialog.close());
 els.detailTabs.forEach((tab) => {
   tab.addEventListener("click", () => renderTableDetailTab(tab.dataset.tab));
+});
+els.processDetailTabs.forEach((tab) => {
+  tab.addEventListener("click", () => renderProcessDetailTab(tab.dataset.tab));
 });
 els.openSettings.addEventListener("click", () => {
   updateScriptVersionInputs();
   updateAutoAlertsInput();
+  updateAgentConnectionInputs();
   els.settingsDialog.showModal();
 });
 els.closeSettings.addEventListener("click", () => els.settingsDialog.close());
@@ -1354,6 +1593,10 @@ els.autoAlertsInput.addEventListener("change", () => {
     runAllAlerts();
   }
 });
+els.agentCredentialsEnabled.addEventListener("change", saveAgentConnection);
+els.agentDatabase.addEventListener("input", saveAgentConnection);
+els.agentUsername.addEventListener("input", saveAgentConnection);
+els.agentPassword.addEventListener("input", saveAgentConnection);
 els.scriptVersionInputs.forEach((input) => {
   input.addEventListener("change", async () => {
     saveScriptVersion(input.value);
@@ -1381,6 +1624,7 @@ async function initializeApp() {
   updateAuthFields();
   updateScriptVersionInputs();
   updateAutoAlertsInput();
+  updateAgentConnectionInputs();
   loadConnectionDraft();
   await loadDefaultConnection();
   await loadQueries();

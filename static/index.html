@@ -197,6 +197,27 @@
       <div class="table-detail-body" id="codeDetailBody"></div>
     </dialog>
 
+    <dialog id="processDetailDialog" class="table-detail-dialog">
+      <div class="dialog-head">
+        <h2 id="processDetailTitle">Process detail</h2>
+        <button id="closeProcessDetail" title="Close">x</button>
+      </div>
+      <div class="detail-tabs" role="tablist" aria-label="Process detail sections">
+        <button class="process-detail-tab active" data-tab="overview" type="button">Overview</button>
+        <button class="process-detail-tab" data-tab="steps" type="button">Steps</button>
+        <button class="process-detail-tab" data-tab="recentRuns" type="button">Recent Runs</button>
+      </div>
+      <div class="table-detail-body" id="processDetailBody"></div>
+    </dialog>
+
+    <dialog id="stepObjectsDialog" class="table-detail-dialog">
+      <div class="dialog-head">
+        <h2 id="stepObjectsTitle">Step SQL objects</h2>
+        <button id="closeStepObjects" title="Close">x</button>
+      </div>
+      <div class="table-detail-body" id="stepObjectsBody"></div>
+    </dialog>
+
     <dialog id="settingsDialog" class="settings-dialog">
       <div class="dialog-head">
         <h2>Settings</h2>
@@ -224,6 +245,28 @@
             <input id="autoAlerts" type="checkbox" />
             <span>Auto-detect alerts</span>
           </label>
+        </section>
+        <section>
+          <h3>SQL Agent credentials</h3>
+          <p>Use a dedicated login for process documentation queries that need msdb access.</p>
+          <label class="switch-row">
+            <input id="agentCredentialsEnabled" type="checkbox" />
+            <span>Use dedicated SQL Agent login</span>
+          </label>
+          <div class="settings-grid">
+            <label>
+              DB
+              <input id="agentDatabase" placeholder="msdb" />
+            </label>
+            <label>
+              User
+              <input id="agentUsername" placeholder="agent user" />
+            </label>
+            <label class="settings-grid-wide">
+              Password
+              <input id="agentPassword" type="password" placeholder="agent password" />
+            </label>
+          </div>
         </section>
       </div>
     </dialog>
