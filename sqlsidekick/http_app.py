@@ -76,6 +76,9 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/run-query":
             self.handle_run_query()
             return
+        if parsed.path == "/api/run-lineage-query":
+            self.handle_run_lineage_query()
+            return
         if parsed.path == "/api/run-alerts":
             self.handle_run_alerts()
             return
@@ -106,6 +109,33 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
             return execute_query(settings, queries[name].sql)
 
         self.handle_sql_action(action, payload=payload)
+
+    def handle_run_lineage_query(self) -> None:
+        payload = self.read_json()
+        name = str(payload.get("queryName", "")).strip()
+        version = normalize_version(str(payload.get("scriptVersion", "full")))
+        if name not in {"process_lineage", "used_by_jobs"}:
+            self.send_json({"error": "Consulta de lineage no soportada."}, status=400)
+            return
+
+        queries = load_named_queries(self.queries_path, version=version)
+        if "process_sql_objects" not in queries:
+            self.send_json({"error": "Consulta base process_sql_objects no encontrada."}, status=404)
+            return
+
+        try:
+            primary_settings = ConnectionSettings.from_payload(payload.get("connection", payload))
+            agent_payload = payload.get("agentConnection") or payload.get("connection", payload)
+            agent_settings = ConnectionSettings.from_payload(agent_payload)
+            process_objects = execute_query(agent_settings, queries["process_sql_objects"].sql)
+            rows = process_objects.get("resultSets", [{}])[0].get("rows", [])
+            sql = lineage_from_process_objects_sql(name, rows)
+            result = execute_query(primary_settings, sql)
+            self.send_json({"ok": True, **result})
+        except SQLServerError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": f"Error inesperado: {exc}"}, status=500)
 
     def handle_run_alerts(self) -> None:
         payload = self.read_json()
@@ -416,6 +446,182 @@ def uniqueidentifier_literal(value: str) -> str:
     if not stripped:
         return "NULL"
     return "TRY_CONVERT(uniqueidentifier, " + sql_literal(stripped) + ")"
+
+
+def nullable_sql_literal(value: Any) -> str:
+    if value is None or value == "":
+        return "NULL"
+    return sql_literal(str(value))
+
+
+def nullable_int_literal(value: Any) -> str:
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return "NULL"
+
+
+def lineage_from_process_objects_sql(query_name: str, rows: list[dict[str, Any]]) -> str:
+    payload_rows: list[dict[str, Any]] = []
+    for row in rows:
+        object_name = row.get("object_name") or row.get("called_object_name")
+        if not object_name:
+            continue
+        payload_rows.append(
+            {
+                "process_name": row.get("process_name"),
+                "job_id": row.get("job_id"),
+                "step_order": row.get("step_order") or row.get("step_id"),
+                "step_name": row.get("step_name"),
+                "database_name": row.get("database_name"),
+                "called_schema": row.get("schema_name") or "dbo",
+                "called_object_name": object_name,
+            }
+        )
+
+    if not payload_rows:
+        if query_name == "used_by_jobs":
+            return """
+SELECT
+    CAST(NULL AS sysname) AS referenced_schema,
+    CAST(NULL AS sysname) AS referenced_object,
+    CAST(NULL AS nvarchar(60)) AS referenced_type,
+    CAST(NULL AS sysname) AS process_name,
+    CAST(NULL AS int) AS step_order,
+    CAST(NULL AS sysname) AS step_name,
+    CAST(NULL AS sysname) AS database_name,
+    CAST(NULL AS sysname) AS called_schema,
+    CAST(NULL AS sysname) AS called_object_name,
+    CAST(NULL AS varchar(10)) AS confidence
+WHERE 1 = 0;
+"""
+        return """
+SELECT
+    CAST(NULL AS sysname) AS process_name,
+    CAST(NULL AS int) AS step_order,
+    CAST(NULL AS sysname) AS step_name,
+    CAST(NULL AS sysname) AS database_name,
+    CAST(NULL AS sysname) AS called_schema,
+    CAST(NULL AS sysname) AS called_object_name,
+    CAST(NULL AS sysname) AS referenced_schema,
+    CAST(NULL AS sysname) AS referenced_object,
+    CAST(NULL AS nvarchar(60)) AS referenced_type,
+    CAST(NULL AS varchar(10)) AS confidence
+WHERE 1 = 0;
+"""
+
+    payload_json = sql_literal(json.dumps(payload_rows, ensure_ascii=True, default=str))
+    common = f"""
+DECLARE @lineage_json nvarchar(max) = {payload_json};
+DECLARE @called TABLE (
+    process_name sysname NULL,
+    job_id uniqueidentifier NULL,
+    step_order int NULL,
+    step_name sysname NULL,
+    database_name sysname NULL,
+    called_schema sysname NULL,
+    called_object_name sysname NULL
+);
+
+INSERT INTO @called (
+    process_name,
+    job_id,
+    step_order,
+    step_name,
+    database_name,
+    called_schema,
+    called_object_name
+)
+SELECT
+    process_name,
+    TRY_CONVERT(uniqueidentifier, job_id),
+    step_order,
+    step_name,
+    database_name,
+    called_schema,
+    called_object_name
+FROM OPENJSON(@lineage_json)
+WITH (
+    process_name sysname '$.process_name',
+    job_id nvarchar(50) '$.job_id',
+    step_order int '$.step_order',
+    step_name sysname '$.step_name',
+    database_name sysname '$.database_name',
+    called_schema sysname '$.called_schema',
+    called_object_name sysname '$.called_object_name'
+);
+
+WITH resolved AS (
+    SELECT
+        c.process_name,
+        c.job_id,
+        c.step_order,
+        c.step_name,
+        c.database_name,
+        COALESCE(c.called_schema, 'dbo') AS called_schema,
+        c.called_object_name,
+        o.object_id AS called_object_id
+    FROM @called AS c
+    LEFT JOIN sys.schemas AS s
+        ON s.name = COALESCE(c.called_schema, 'dbo')
+    LEFT JOIN sys.objects AS o
+        ON o.schema_id = s.schema_id
+       AND o.name = c.called_object_name
+)
+"""
+    if query_name == "used_by_jobs":
+        return common + """
+SELECT
+    COALESCE(target_schema.name, sed.referenced_schema_name) AS referenced_schema,
+    COALESCE(target_object.name, sed.referenced_entity_name) AS referenced_object,
+    target_object.type_desc AS referenced_type,
+    resolved.process_name,
+    resolved.step_order,
+    resolved.step_name,
+    resolved.database_name,
+    resolved.called_schema,
+    resolved.called_object_name,
+    CASE
+        WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NOT NULL THEN 'High'
+        WHEN resolved.called_object_id IS NOT NULL THEN 'Medium'
+        ELSE 'Low'
+    END AS confidence
+FROM resolved
+LEFT JOIN sys.sql_expression_dependencies AS sed
+    ON sed.referencing_id = resolved.called_object_id
+LEFT JOIN sys.objects AS target_object
+    ON target_object.object_id = sed.referenced_id
+LEFT JOIN sys.schemas AS target_schema
+    ON target_schema.schema_id = target_object.schema_id
+WHERE COALESCE(target_object.name, sed.referenced_entity_name) IS NOT NULL
+ORDER BY referenced_schema, referenced_object, process_name, step_order;
+"""
+
+    return common + """
+SELECT
+    resolved.process_name,
+    resolved.step_order,
+    resolved.step_name,
+    resolved.database_name,
+    resolved.called_schema,
+    resolved.called_object_name,
+    COALESCE(target_schema.name, sed.referenced_schema_name) AS referenced_schema,
+    COALESCE(target_object.name, sed.referenced_entity_name) AS referenced_object,
+    target_object.type_desc AS referenced_type,
+    CASE
+        WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NOT NULL THEN 'High'
+        WHEN resolved.called_object_id IS NOT NULL THEN 'Medium'
+        ELSE 'Low'
+    END AS confidence
+FROM resolved
+LEFT JOIN sys.sql_expression_dependencies AS sed
+    ON sed.referencing_id = resolved.called_object_id
+LEFT JOIN sys.objects AS target_object
+    ON target_object.object_id = sed.referenced_id
+LEFT JOIN sys.schemas AS target_schema
+    ON target_schema.schema_id = target_object.schema_id
+ORDER BY process_name, step_order, referenced_schema, referenced_object;
+"""
 
 
 def process_detail_sql(process_name: str, job_id: str = "") -> str:

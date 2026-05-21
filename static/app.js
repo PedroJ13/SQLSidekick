@@ -45,7 +45,7 @@ const PROCESS_GROUPS = [];
 const LINEAGE_GROUPS = [
   {
     title: "Lineage",
-    names: ["object_references", "table_usage", "process_lineage"],
+    names: ["object_references", "table_usage", "process_lineage", "used_by_jobs"],
   },
 ];
 
@@ -417,6 +417,10 @@ function getQueryConnection(useAgent = false) {
     username: state.agentConnection.username || "",
     password: state.agentConnection.password || "",
   };
+}
+
+function shouldUseMixedLineageQuery() {
+  return ["process_lineage", "used_by_jobs"].includes(state.activeQuery?.name);
 }
 
 function shouldUseAgentConnection() {
@@ -902,10 +906,20 @@ async function runActiveQuery() {
   els.runQuery.disabled = true;
   els.runQuery.innerHTML = `<span class="icon-loading-dot" aria-hidden="true"></span>`;
   try {
-    const payload = await api("/api/run-query", {
+    const isMixedLineage = shouldUseMixedLineageQuery();
+    if (isMixedLineage && !shouldUseAgentConnection()) {
+      state.columns = [];
+      state.rows = [];
+      renderResults();
+      renderEmptyTable("Configure SQL Agent / msdb credentials in Settings to run this lineage section.");
+      showMessage(els.message, "This lineage section needs the dedicated SQL Agent / msdb login configured in Settings.", "error");
+      return;
+    }
+    const payload = await api(isMixedLineage ? "/api/run-lineage-query" : "/api/run-query", {
       method: "POST",
       body: JSON.stringify({
         connection: getQueryConnection(),
+        agentConnection: shouldUseAgentConnection() ? getQueryConnection(true) : null,
         queryName: state.activeQuery.name,
         scriptVersion: state.scriptVersion,
       }),
@@ -916,8 +930,14 @@ async function runActiveQuery() {
     state.tablePage = 1;
     state.filterColumn = getDefaultFilterColumn();
     updateTableFilterUI();
-    renderResults();
-    clearMessage(els.message);
+    if (isMixedLineage && state.rows.length === 0) {
+      renderResults();
+      renderEmptyTable("No process lineage rows found. Check SQL Agent credentials and job step visibility.");
+      showMessage(els.message, "No lineage rows were found from SQL Agent jobs. Verify the special msdb login can read job steps.", "error");
+    } else {
+      renderResults();
+      clearMessage(els.message);
+    }
   } catch (error) {
     markQueryFailed(state.activeQuery.name, error.message);
     showMessage(els.message, error.message, "error");
@@ -959,7 +979,18 @@ function resetWorkspace() {
 }
 
 function renderResults() {
-  if (state.rows.length <= 1) {
+  if (state.rows.length === 0) {
+    els.message.classList.add("hidden");
+    els.tableTools.classList.add("hidden");
+    els.cardView.classList.add("hidden");
+    els.tableWrap.classList.remove("hidden");
+    els.exportCsv.disabled = true;
+    els.rowCount.textContent = "0";
+    els.columnCount.textContent = String(state.columns.length);
+    renderEmptyTable("No rows to display.");
+    return;
+  }
+  if (state.rows.length <= 1 && shouldRenderSingleRowAsCard()) {
     renderCards();
     return;
   }
@@ -968,6 +999,10 @@ function renderResults() {
   els.cardView.classList.add("hidden");
   els.tableWrap.classList.remove("hidden");
   renderTable();
+}
+
+function shouldRenderSingleRowAsCard() {
+  return Boolean(CARD_GROUPS[state.activeQuery?.name]);
 }
 
 function renderCards() {
@@ -1152,6 +1187,7 @@ function getDefaultFilterColumn() {
     object_references: ["source_object", "target_object", "source_schema", "target_schema"],
     table_usage: ["table_name", "used_by_object", "table_schema"],
     process_lineage: ["process_name", "called_object_name", "referenced_object"],
+    used_by_jobs: ["referenced_object", "process_name", "called_object_name"],
   };
   const candidates = preferredByQuery[state.activeQuery?.name] || [];
   return candidates.find((column) => state.columns.includes(column)) || inferNameColumn();
