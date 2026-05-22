@@ -40,7 +40,12 @@ const DOCUMENTATION_GROUPS = [
   { title: "Analysis", names: ["review_findings", "index_usage", "index_physical_stats", "missing_indexes", "statistics"] },
 ];
 
-const PROCESS_GROUPS = [];
+const PROCESS_GROUPS = [
+  {
+    title: "Lineage maps",
+    names: ["job_lineage_map", "procedure_lineage_map", "view_lineage_map", "function_lineage_map"],
+  },
+];
 
 const LINEAGE_GROUPS = [
   {
@@ -170,7 +175,40 @@ const CONNECTION_DRAFT_KEY = "sqlsidekick.connectionDraft";
 const SCRIPT_VERSION_KEY = "sqlsidekick.scriptVersion";
 const AUTO_ALERTS_KEY = "sqlsidekick.autoAlerts";
 const AGENT_CONNECTION_KEY = "sqlsidekick.agentConnection";
+const PROCESS_MAP_SELECTIONS_KEY = "sqlsidekick.processMapSelections";
 const TABLE_PAGE_SIZE = 50;
+const DEFAULT_PROCESS_MAP_NAME = "TeamRecalculationMWRLife";
+const DEFAULT_PROCESS_MAP_NAMES = ["TeamRecalculationMWRLife", "DailyResidualNew_DualTeam"];
+const LINEAGE_MAP_CONFIG = {
+  job_lineage_map: {
+    mapType: "jobs",
+    label: "Job",
+    defaultName: DEFAULT_PROCESS_MAP_NAME,
+    emptyTitle: "No jobs detected.",
+    emptyDescription: "Check SQL Agent credentials in Settings or confirm SQL Agent metadata is available.",
+  },
+  procedure_lineage_map: {
+    mapType: "procedures",
+    label: "Procedure",
+    defaultName: "",
+    emptyTitle: "No procedures detected.",
+    emptyDescription: "The selected database did not return stored procedures for this map.",
+  },
+  view_lineage_map: {
+    mapType: "views",
+    label: "View",
+    defaultName: "",
+    emptyTitle: "No views detected.",
+    emptyDescription: "The selected database did not return views for this map.",
+  },
+  function_lineage_map: {
+    mapType: "functions",
+    label: "Function",
+    defaultName: "",
+    emptyTitle: "No functions detected.",
+    emptyDescription: "The selected database did not return functions for this map.",
+  },
+};
 
 const GROUP_CATEGORY_SLUGS = {
   Server: "server",
@@ -216,6 +254,12 @@ const state = {
     columns: [],
     error: "",
   },
+  processMapName: DEFAULT_PROCESS_MAP_NAME,
+  processMapNames: [...DEFAULT_PROCESS_MAP_NAMES],
+  processMapType: "jobs",
+  processMapLabel: "Job",
+  processMapNameByType: loadProcessMapSelections(),
+  processMapDetails: {},
 };
 
 const els = {
@@ -277,6 +321,10 @@ const els = {
   stepObjectsTitle: document.querySelector("#stepObjectsTitle"),
   stepObjectsBody: document.querySelector("#stepObjectsBody"),
   closeStepObjects: document.querySelector("#closeStepObjects"),
+  mapDetailDialog: document.querySelector("#mapDetailDialog"),
+  mapDetailTitle: document.querySelector("#mapDetailTitle"),
+  mapDetailBody: document.querySelector("#mapDetailBody"),
+  closeMapDetail: document.querySelector("#closeMapDetail"),
   alertsDialog: document.querySelector("#alertsDialog"),
   alertsTitle: document.querySelector("#alertsTitle"),
   alertsBody: document.querySelector("#alertsBody"),
@@ -350,6 +398,22 @@ function loadAgentConnection() {
     localStorage.removeItem(AGENT_CONNECTION_KEY);
     return { enabled: false, database: "msdb", username: "", password: "" };
   }
+}
+
+function loadProcessMapSelections() {
+  try {
+    const raw = localStorage.getItem(PROCESS_MAP_SELECTIONS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    localStorage.removeItem(PROCESS_MAP_SELECTIONS_KEY);
+    return {};
+  }
+}
+
+function saveProcessMapSelections() {
+  localStorage.setItem(PROCESS_MAP_SELECTIONS_KEY, JSON.stringify(state.processMapNameByType || {}));
 }
 
 function saveAgentConnection() {
@@ -698,7 +762,7 @@ async function runAlertCheck(groupTitle, sweepId = state.alertsSweepId) {
     const payload = await api("/api/run-alerts", {
       method: "POST",
       body: JSON.stringify({
-        connection: state.connection,
+        connection: category === "processes" && shouldUseAgentConnection() ? getQueryConnection(true) : state.connection,
         category,
       }),
     });
@@ -906,6 +970,10 @@ async function runActiveQuery() {
   els.runQuery.disabled = true;
   els.runQuery.innerHTML = `<span class="icon-loading-dot" aria-hidden="true"></span>`;
   try {
+    if (LINEAGE_MAP_CONFIG[state.activeQuery.name]) {
+      await runProcessLineageMap();
+      return;
+    }
     const isMixedLineage = shouldUseMixedLineageQuery();
     if (isMixedLineage && !shouldUseAgentConnection()) {
       state.columns = [];
@@ -1003,6 +1071,871 @@ function renderResults() {
 
 function shouldRenderSingleRowAsCard() {
   return Boolean(CARD_GROUPS[state.activeQuery?.name]);
+}
+
+async function runProcessLineageMap(processName = null) {
+  const config = LINEAGE_MAP_CONFIG[state.activeQuery?.name] || LINEAGE_MAP_CONFIG.job_lineage_map;
+  const requestedName = processName ?? state.processMapNameByType?.[config.mapType] ?? config.defaultName;
+  state.processMapType = config.mapType;
+  state.processMapLabel = config.label;
+  state.processMapName = requestedName;
+  const payload = await api("/api/process-lineage-map", {
+    method: "POST",
+    body: JSON.stringify({
+      connection: getQueryConnection(),
+      agentConnection: config.mapType === "jobs" && shouldUseAgentConnection() ? getQueryConnection(true) : null,
+      processName: requestedName,
+      mapType: config.mapType,
+    }),
+  });
+  state.processMapName = payload.processName || requestedName;
+  state.processMapNameByType = {
+    ...(state.processMapNameByType || {}),
+    [config.mapType]: state.processMapName,
+  };
+  saveProcessMapSelections();
+  if (payload.availableProcesses?.length) {
+    state.processMapNames = payload.availableProcesses;
+  } else {
+    state.processMapNames = [];
+  }
+  const resultSet = payload.resultSets?.[0] || { columns: [], rows: [] };
+  state.columns = resultSet.columns || [];
+  state.rows = resultSet.rows || [];
+  state.tablePage = 1;
+  state.filterColumn = "";
+  els.exportCsv.disabled = true;
+  els.tableTools.classList.add("hidden");
+  els.pagination.classList.add("hidden");
+  els.tableWrap.classList.add("hidden");
+  els.cardView.classList.remove("hidden");
+  els.cardView.innerHTML = renderProcessLineageMap(
+    state.processMapName,
+    state.rows,
+    payload.processObjects || [],
+    payload.tableFeatures || [],
+    config
+  );
+  bindProcessMapControls();
+  clearMessage(els.message);
+}
+
+function renderProcessLineageMap(processName, rows, processObjects, tableFeatures = [], config = LINEAGE_MAP_CONFIG.job_lineage_map) {
+  state.processMapDetails = {};
+  const tree = buildProcessLineageTree(processName, rows, processObjects, tableFeatures);
+  if (tree.steps.length === 0) {
+    return `
+      <div class="process-map-empty">
+        <strong>${escapeHtml(config.emptyTitle || `No lineage detected for ${processName}.`)}</strong>
+        <span>${escapeHtml(config.emptyDescription || "No SQL objects were returned for this map.")}</span>
+      </div>
+    `;
+  }
+
+  const impact = summarizeProcessMapImpact(tree);
+
+  return `
+    <section class="process-map">
+      <div class="process-map-head">
+        <div>
+          <span class="map-kicker">Focused online map</span>
+          <h3>${escapeHtml(processName)}</h3>
+        </div>
+        <div class="map-stats" aria-label="Map summary">
+          <span><strong>${impact.stepCount}</strong> ${config.mapType === "jobs" ? "steps" : "roots"}</span>
+          <span><strong>${impact.objectCount}</strong> SQL objects</span>
+          <span><strong>${impact.tableCount}</strong> tables</span>
+          <span><strong>${impact.triggerCount}</strong> triggers</span>
+          <span><strong>${impact.computedColumnCount}</strong> computed</span>
+          <span class="${impact.partialDependencyCount ? "stat-warning" : ""}"><strong>${impact.partialDependencyCount}</strong> partial</span>
+        </div>
+      </div>
+      <div class="process-map-actions">
+        <div class="process-picker">
+          <label class="process-picker-label" for="processMapSearch">${escapeHtml(config.label || "Object")}</label>
+          <input
+            id="processMapSearch"
+            class="process-picker-input"
+            type="search"
+            value="${escapeHtml(processName)}"
+            placeholder="Search ${escapeHtml(String(config.label || "object").toLowerCase())}..."
+            autocomplete="off"
+          />
+          <button type="button" class="process-picker-menu-button" title="Show ${escapeHtml(String(config.label || "object").toLowerCase())}s" aria-label="Show ${escapeHtml(String(config.label || "object").toLowerCase())}s">▾</button>
+          <div class="process-picker-menu hidden">
+            ${state.processMapNames.map((name) => `
+              <button type="button" class="process-picker-option" data-process-name="${escapeHtml(name)}">${escapeHtml(name)}</button>
+            `).join("")}
+          </div>
+          <button type="button" class="process-picker-go">Load</button>
+        </div>
+        <div class="process-map-button-group">
+          <div class="legend-control">
+            <button type="button" class="legend-toggle-button" title="Confidence legend" aria-label="Confidence legend">i</button>
+            <div class="confidence-legend hidden">
+              <span><strong>High</strong> catalog dependency resolved</span>
+              <span><strong>Medium</strong> object found, dependency partial</span>
+              <span><strong>Low</strong> parsed from job text only</span>
+            </div>
+          </div>
+          <button type="button" class="map-toggle-button" data-map-action="expand" title="Expand all" aria-label="Expand all">+</button>
+          <button type="button" class="map-toggle-button" data-map-action="collapse" title="Collapse all" aria-label="Collapse all">-</button>
+        </div>
+      </div>
+      ${renderProcessLineageGraph(tree, config)}
+      <div class="process-tree">
+        ${tree.steps.map(renderProcessMapStep).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderProcessLineageGraph(tree, config) {
+  const graph = buildProcessLineageGraph(tree, config);
+  if (graph.nodes.length === 0) return "";
+  const width = graph.width;
+  const height = graph.height;
+  return `
+    <details class="lineage-graph" aria-label="Lineage graph" open>
+      <summary class="lineage-graph-head">
+        <span class="node-caret" aria-hidden="true"></span>
+        <strong>Visual lineage</strong>
+        <span>${escapeHtml(graph.caption)}</span>
+      </summary>
+      <div class="lineage-graph-scroll">
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Lineage graph preview">
+          <defs>
+            <marker id="lineageArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z"></path>
+            </marker>
+          </defs>
+          ${graph.links.map((link) => renderGraphLink(link, graph.nodeMap)).join("")}
+          ${graph.nodes.map(renderGraphNode).join("")}
+        </svg>
+      </div>
+      ${graph.truncated ? `<div class="lineage-graph-note">Graph preview limited to the first ${graph.limit} nodes. The full detail remains in the tree below.</div>` : ""}
+    </details>
+  `;
+}
+
+function buildProcessLineageGraph(tree, config) {
+  const maxNodes = 80;
+  const columnWidth = 260;
+  const rowHeight = 72;
+  const nodeWidth = 190;
+  const nodeHeight = 42;
+  const nodes = [];
+  const links = [];
+  const seen = new Set();
+  const columnRows = [0, 0, 0, 0, 0];
+  let truncated = false;
+
+  const addNode = (id, label, kind, column) => {
+    if (seen.has(id)) return id;
+    if (nodes.length >= maxNodes) {
+      truncated = true;
+      return id;
+    }
+    seen.add(id);
+    const row = columnRows[column] || 0;
+    columnRows[column] = row + 1;
+    nodes.push({
+      id,
+      label,
+      kind,
+      x: 28 + column * columnWidth,
+      y: 28 + row * rowHeight,
+      width: nodeWidth,
+      height: nodeHeight,
+    });
+    return id;
+  };
+  const addLink = (from, to) => {
+    if (!seen.has(from) || !seen.has(to)) return;
+    links.push({ from, to });
+  };
+
+  const rootId = addNode("root", tree.processName, config.mapType === "jobs" ? "job" : "root", 0);
+  tree.steps.forEach((step) => {
+    const stepId = `step:${step.stepOrder}`;
+    addNode(stepId, config.mapType === "jobs" ? `Step ${step.stepOrder}: ${step.stepName}` : step.stepName, "step", 1);
+    addLink(rootId, stepId);
+    step.objects.forEach((object) => {
+      const objectId = `object:${step.stepOrder}:${object.schemaName}.${object.objectName}`;
+      addNode(objectId, `${object.schemaName}.${object.objectName}`, "object", 2);
+      addLink(stepId, objectId);
+      object.tables.forEach((table) => {
+        const tableId = `table:${table.schemaName}.${table.objectName}`;
+        addNode(tableId, `${table.schemaName}.${table.objectName}`, "table", 3);
+        addLink(objectId, tableId);
+        table.features?.forEach((feature) => {
+          const featureId = `feature:${table.schemaName}.${table.objectName}:${feature.kind}:${feature.schemaName}.${feature.objectName}`;
+          const featureType = formatTableFeatureType(feature);
+          addNode(featureId, `${featureType.badge} ${feature.objectName}`, featureType.kind === "trigger" ? "trigger" : "computed", 4);
+          addLink(tableId, featureId);
+        });
+      });
+    });
+  });
+
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const usedColumns = Math.max(...nodes.map((node) => Math.floor((node.x - 28) / columnWidth)), 0) + 1;
+  return {
+    nodes,
+    links,
+    nodeMap,
+    truncated,
+    limit: maxNodes,
+    width: Math.max(720, 28 + usedColumns * columnWidth),
+    height: Math.max(180, 28 + Math.max(...columnRows, 1) * rowHeight),
+    caption: `${nodes.length} nodes, ${links.length} links`,
+  };
+}
+
+function renderGraphLink(link, nodeMap) {
+  const from = nodeMap.get(link.from);
+  const to = nodeMap.get(link.to);
+  if (!from || !to) return "";
+  const startX = from.x + from.width;
+  const startY = from.y + from.height / 2;
+  const endX = to.x;
+  const endY = to.y + to.height / 2;
+  const mid = Math.max(36, (endX - startX) / 2);
+  return `<path class="lineage-link" d="M ${startX} ${startY} C ${startX + mid} ${startY}, ${endX - mid} ${endY}, ${endX} ${endY}"></path>`;
+}
+
+function renderGraphNode(node) {
+  return `
+    <g class="lineage-node lineage-node-${escapeHtml(node.kind)}" transform="translate(${node.x} ${node.y})">
+      <title>${escapeHtml(node.label)}</title>
+      <rect width="${node.width}" height="${node.height}" rx="7"></rect>
+      <text x="12" y="25">${escapeHtml(truncateMiddle(node.label, 28))}</text>
+    </g>
+  `;
+}
+
+function buildProcessLineageTree(processName, rows, processObjects, tableFeatures = []) {
+  const steps = new Map();
+  const featuresByTable = new Map();
+  tableFeatures.forEach((feature) => {
+    const tableSchema = feature.table_schema || "dbo";
+    const tableName = feature.table_name || "";
+    if (!tableName) return;
+    const tableKey = `${tableSchema}.${tableName}`.toLowerCase();
+    if (!featuresByTable.has(tableKey)) featuresByTable.set(tableKey, []);
+    featuresByTable.get(tableKey).push({
+      kind: feature.feature_kind || "",
+      schemaName: feature.feature_schema || tableSchema,
+      objectName: feature.feature_name || "",
+      type: feature.feature_type || "",
+      status: feature.status || "",
+      events: feature.events || "",
+      referencedColumns: feature.referenced_columns || "",
+      definition: feature.definition || "",
+    });
+  });
+  const addObject = (raw) => {
+    const stepOrder = raw.step_order ?? raw.step_id ?? "-";
+    const stepKey = String(stepOrder);
+    if (!steps.has(stepKey)) {
+      steps.set(stepKey, {
+        stepOrder,
+        stepName: raw.step_name || `Step ${stepOrder}`,
+        dbName: raw.database_name || "",
+        objects: new Map(),
+      });
+    }
+    const step = steps.get(stepKey);
+    const schemaName = raw.called_schema || raw.schema_name || "dbo";
+    const objectName = raw.called_object_name || raw.object_name || "";
+    if (!objectName) return null;
+    const objectKey = `${schemaName}.${objectName}`;
+    if (!step.objects.has(objectKey)) {
+      step.objects.set(objectKey, {
+        schemaName,
+        objectName,
+        objectType: raw.object_type || raw.called_object_type || "SQL object",
+        confidence: raw.confidence || "",
+        calledDefinition: raw.called_definition || "",
+        commandFragments: uniqueFragments([raw.command_preview]),
+        tables: new Map(),
+      });
+    } else if (raw.command_preview || raw.called_definition) {
+      const existing = step.objects.get(objectKey);
+      existing.commandFragments = uniqueFragments([...(existing.commandFragments || []), raw.command_preview]);
+      existing.calledDefinition = existing.calledDefinition || raw.called_definition || "";
+    }
+    return step.objects.get(objectKey);
+  };
+
+  processObjects.forEach((raw) => addObject(raw));
+  rows.forEach((row) => {
+    const object = addObject(row);
+    if (!object) return;
+    const referencedType = String(row.referenced_type || "").toUpperCase();
+    const referencedObject = row.referenced_object || "";
+    if (!referencedObject || !referencedType.includes("TABLE")) return;
+    const tableSchema = row.referenced_schema || "dbo";
+    const tableKey = `${tableSchema}.${referencedObject}`;
+    const codeFragments = extractCodeFragments(row.called_definition || object.calledDefinition, tableSchema, referencedObject);
+    object.tables.set(tableKey, {
+      schemaName: tableSchema,
+      objectName: referencedObject,
+      type: row.referenced_type || "USER_TABLE",
+      confidence: row.confidence || object.confidence || "",
+      features: featuresByTable.get(tableKey.toLowerCase()) || [],
+      commandFragments: uniqueFragments([
+        ...((object.tables.get(tableKey)?.commandFragments) || []),
+        ...codeFragments,
+      ]),
+    });
+  });
+
+  const tree = {
+    processName,
+    steps: Array.from(steps.values())
+      .sort((a, b) => Number(a.stepOrder) - Number(b.stepOrder))
+      .map((step) => ({
+        ...step,
+        objects: Array.from(step.objects.values()).map((object) => ({
+          ...object,
+          tables: Array.from(object.tables.values()).sort((a, b) =>
+            `${a.schemaName}.${a.objectName}`.localeCompare(`${b.schemaName}.${b.objectName}`)
+          ),
+        })),
+      })),
+  };
+  attachReverseTableUsages(tree);
+  return tree;
+}
+
+function summarizeProcessMapImpact(tree) {
+  const objects = new Set();
+  const tables = new Set();
+  const triggers = new Set();
+  const computedColumns = new Set();
+  const partialDependencies = new Set();
+  tree.steps.forEach((step) => {
+    step.objects.forEach((object) => {
+      objects.add(`${object.schemaName}.${object.objectName}`.toLowerCase());
+      if (String(object.confidence || "").toLowerCase() !== "high") {
+        partialDependencies.add(`object:${step.stepOrder}:${object.schemaName}.${object.objectName}`.toLowerCase());
+      }
+      object.tables.forEach((table) => {
+        tables.add(`${table.schemaName}.${table.objectName}`.toLowerCase());
+        if (String(table.confidence || "").toLowerCase() !== "high") {
+          partialDependencies.add(`table:${table.schemaName}.${table.objectName}`.toLowerCase());
+        }
+        table.features?.forEach((feature) => {
+          const featureKey = `${table.schemaName}.${table.objectName}.${feature.schemaName}.${feature.objectName}`.toLowerCase();
+          if (String(feature.kind || "").toLowerCase() === "trigger") {
+            triggers.add(featureKey);
+          } else {
+            computedColumns.add(featureKey);
+          }
+        });
+      });
+    });
+  });
+  return {
+    stepCount: tree.steps.length,
+    objectCount: objects.size,
+    tableCount: tables.size,
+    triggerCount: triggers.size,
+    computedColumnCount: computedColumns.size,
+    partialDependencyCount: partialDependencies.size,
+  };
+}
+
+function attachReverseTableUsages(tree) {
+  const usagesByTable = new Map();
+  tree.steps.forEach((step) => {
+    step.objects.forEach((object) => {
+      const objectType = formatObjectType(object.objectType).label;
+      object.tables.forEach((table) => {
+        const tableKey = `${table.schemaName}.${table.objectName}`.toLowerCase();
+        if (!usagesByTable.has(tableKey)) usagesByTable.set(tableKey, []);
+        usagesByTable.get(tableKey).push({
+          processName: tree.processName,
+          stepOrder: step.stepOrder,
+          stepName: step.stepName,
+          dbName: step.dbName,
+          objectName: `${object.schemaName}.${object.objectName}`,
+          objectType,
+          confidence: table.confidence || object.confidence || "",
+        });
+      });
+    });
+  });
+
+  tree.steps.forEach((step) => {
+    step.objects.forEach((object) => {
+      object.tables.forEach((table) => {
+        const tableKey = `${table.schemaName}.${table.objectName}`.toLowerCase();
+        table.usedBy = uniqueTableUsages(usagesByTable.get(tableKey) || []);
+      });
+    });
+  });
+}
+
+function uniqueTableUsages(usages) {
+  const seen = new Set();
+  const output = [];
+  usages.forEach((usage) => {
+    const key = `${usage.stepOrder}|${usage.objectName}|${usage.dbName}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    output.push(usage);
+  });
+  return output.sort((a, b) => {
+    const byStep = Number(a.stepOrder) - Number(b.stepOrder);
+    if (!Number.isNaN(byStep) && byStep !== 0) return byStep;
+    return String(a.objectName).localeCompare(String(b.objectName));
+  });
+}
+
+function renderProcessMapStep(step) {
+  return `
+    <details class="process-step-node" open>
+      <summary>
+        <span class="node-caret" aria-hidden="true"></span>
+        <span class="node-badge">Step ${escapeHtml(step.stepOrder)}</span>
+        <strong>${escapeHtml(step.stepName)}</strong>
+        ${step.dbName ? `<span class="node-muted">${escapeHtml(step.dbName)}</span>` : ""}
+      </summary>
+      <div class="process-object-list">
+        ${
+          step.objects.length > 0
+            ? step.objects.map((object) => renderProcessMapObject(object, step)).join("")
+            : renderMapEmptyState(
+                "No SQL objects detected.",
+                "This step may not be T-SQL, may use dynamic command text, or the current login may not see the object metadata."
+              )
+        }
+      </div>
+    </details>
+  `;
+}
+
+function renderProcessMapObject(object, step) {
+  const objectType = formatObjectType(object.objectType);
+  const detailKey = registerProcessMapDetail({
+    kind: "SQL Object",
+    name: `${object.schemaName}.${object.objectName}`,
+    type: objectType.label,
+    confidence: object.confidence,
+    processName: state.processMapName,
+    stepOrder: step.stepOrder,
+    stepName: step.stepName,
+    dbName: step.dbName,
+    commandFragments: object.commandFragments || [],
+    fragmentTitle: "Job command fragments",
+  });
+  return `
+    <details class="process-object-node" open>
+      <summary>
+        <span class="node-caret" aria-hidden="true"></span>
+        <span class="node-badge sql-object">${escapeHtml(objectType.badge)}</span>
+        <strong>${escapeHtml(object.schemaName)}.${escapeHtml(object.objectName)}</strong>
+        <span class="node-muted">${escapeHtml(objectType.label)}</span>
+        ${object.confidence ? `<span class="confidence-pill" title="${escapeHtml(confidenceDescription(object.confidence))}">Confidence: ${escapeHtml(object.confidence)}</span>` : ""}
+        <button type="button" class="map-detail-button" data-detail-key="${escapeHtml(detailKey)}" title="Show detail" aria-label="Show detail">i</button>
+      </summary>
+      <div class="referenced-table-list">
+        ${
+          object.tables.length > 0
+            ? object.tables.map((table) => renderProcessMapTable(table, object, step)).join("")
+            : renderMapEmptyState(
+                "No referenced tables found by SQL Server catalog.",
+                "Dynamic SQL, temp tables, cross-database references, encrypted modules, or metadata permissions can hide dependencies."
+              )
+        }
+      </div>
+    </details>
+  `;
+}
+
+function renderProcessMapTable(table, object, step) {
+  const tableType = formatObjectType(table.type || "USER_TABLE");
+  const detailKey = registerProcessMapDetail({
+    kind: "Referenced Table",
+    name: `${table.schemaName}.${table.objectName}`,
+    type: tableType.label,
+    confidence: table.confidence,
+    processName: state.processMapName,
+    stepOrder: step.stepOrder,
+    stepName: step.stepName,
+    dbName: step.dbName,
+    parentObject: `${object.schemaName}.${object.objectName}`,
+    usedBy: table.usedBy || [],
+    commandFragments: table.commandFragments || object.commandFragments || [],
+    fragmentTitle: "Procedure code fragments",
+  });
+  return `
+    <details class="table-node-shell" open>
+      <summary class="table-node">
+        <span class="node-caret" aria-hidden="true"></span>
+        <span class="node-badge table-object">${escapeHtml(tableType.badge)}</span>
+        <strong>${escapeHtml(table.schemaName)}.${escapeHtml(table.objectName)}</strong>
+        <span class="node-muted">${escapeHtml(tableType.label)}</span>
+        ${table.confidence ? `<span class="confidence-pill" title="${escapeHtml(confidenceDescription(table.confidence))}">Confidence: ${escapeHtml(table.confidence)}</span>` : ""}
+        <button type="button" class="map-detail-button" data-detail-key="${escapeHtml(detailKey)}" title="Show detail" aria-label="Show detail">i</button>
+      </summary>
+      ${
+        table.features?.length
+          ? `<div class="table-feature-list">${table.features.map((feature) => renderTableFeature(feature, table, object, step)).join("")}</div>`
+          : ""
+      }
+    </details>
+  `;
+}
+
+function renderTableFeature(feature, table, object, step) {
+  const featureType = formatTableFeatureType(feature);
+  const featureName = featureType.kind === "computed_column"
+    ? `${table.schemaName}.${table.objectName}.${feature.objectName}`
+    : `${feature.schemaName}.${feature.objectName}`;
+  const detailKey = registerProcessMapDetail({
+    kind: featureType.detailKind,
+    name: featureName,
+    type: feature.type || featureType.label,
+    status: feature.status,
+    events: feature.events,
+    referencedColumns: feature.referencedColumns,
+    processName: state.processMapName,
+    stepOrder: step.stepOrder,
+    stepName: step.stepName,
+    dbName: step.dbName,
+    parentObject: `${table.schemaName}.${table.objectName}`,
+    parentLabel: "Table",
+    calledObject: `${object.schemaName}.${object.objectName}`,
+    commandFragments: uniqueFragments([feature.definition]),
+    fragmentTitle: featureType.fragmentTitle,
+  });
+  return `
+    <div class="table-feature-node">
+      <span class="node-badge ${escapeHtml(featureType.className)}">${escapeHtml(featureType.badge)}</span>
+      <strong>${escapeHtml(featureName)}</strong>
+      <span class="node-muted">${escapeHtml(feature.status || featureType.label)}</span>
+      ${feature.events ? `<span class="node-muted">${escapeHtml(feature.events)}</span>` : ""}
+      <button type="button" class="map-detail-button" data-detail-key="${escapeHtml(detailKey)}" title="Show detail" aria-label="Show detail">i</button>
+    </div>
+  `;
+}
+
+function bindProcessMapControls() {
+  const searchInput = document.querySelector("#processMapSearch");
+  const loadButton = document.querySelector(".process-picker-go");
+  const menuButton = document.querySelector(".process-picker-menu-button");
+  const menu = document.querySelector(".process-picker-menu");
+  const filterProcessOptions = (showAll = false) => {
+    const filter = String(searchInput?.value || "").toLowerCase();
+    document.querySelectorAll(".process-picker-option").forEach((option) => {
+      const name = String(option.dataset.processName || "");
+      option.classList.toggle("hidden", !showAll && Boolean(filter) && !name.toLowerCase().includes(filter));
+    });
+  };
+  const loadSelectedProcess = async () => {
+    const processName = String(searchInput?.value || "").trim();
+    if (!processName || processName === state.processMapName) return;
+    els.cardView.innerHTML = renderMapLoadingState(processName);
+    try {
+      await runProcessLineageMap(processName);
+    } catch (error) {
+      showMessage(els.message, error.message, "error");
+    }
+  };
+  const showMenu = (showAll = false) => {
+    filterProcessOptions(showAll);
+    menu?.classList.remove("hidden");
+  };
+  const hideMenu = () => {
+    menu?.classList.add("hidden");
+  };
+  menuButton?.addEventListener("click", () => {
+    if (menu?.classList.contains("hidden")) {
+      showMenu(true);
+      searchInput?.focus();
+    } else {
+      hideMenu();
+    }
+  });
+  searchInput?.addEventListener("focus", () => showMenu(true));
+  searchInput?.addEventListener("input", () => showMenu(false));
+  loadButton?.addEventListener("click", loadSelectedProcess);
+  searchInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      loadSelectedProcess();
+    } else if (event.key === "Escape") {
+      hideMenu();
+    }
+  });
+  searchInput?.addEventListener("change", () => {
+    if (state.processMapNames.includes(searchInput.value)) {
+      loadSelectedProcess();
+    }
+  });
+  document.querySelectorAll(".process-picker-option").forEach((option) => {
+    option.addEventListener("click", () => {
+      if (searchInput) {
+        searchInput.value = option.dataset.processName || "";
+      }
+      hideMenu();
+      loadSelectedProcess();
+    });
+  });
+  document.querySelectorAll(".map-toggle-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const open = button.dataset.mapAction === "expand";
+      document.querySelectorAll(".process-map details").forEach((details) => {
+        details.open = open;
+      });
+    });
+  });
+  document.querySelectorAll(".legend-toggle-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const legend = button.parentElement?.querySelector(".confidence-legend");
+      legend?.classList.toggle("hidden");
+    });
+  });
+  document.querySelectorAll(".map-detail-button").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      renderProcessMapDetail(button.dataset.detailKey || "");
+    });
+  });
+}
+
+function registerProcessMapDetail(detail) {
+  const key = `detail_${Object.keys(state.processMapDetails).length + 1}`;
+  state.processMapDetails[key] = detail;
+  return key;
+}
+
+function renderMapLoadingState(name) {
+  return `
+    <div class="process-map-empty process-map-loading">
+      <div class="loading-state">
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <div>
+          <strong>Loading ${escapeHtml(name)}</strong>
+          <span>Building the online lineage map.</span>
+        </div>
+        <div class="loading-bar" aria-hidden="true"><span></span></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderMapEmptyState(title, description) {
+  return `
+    <div class="node-empty">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(description)}</span>
+    </div>
+  `;
+}
+
+function renderProcessMapDetail(detailKey) {
+  const detail = state.processMapDetails[detailKey];
+  if (!els.mapDetailDialog || !els.mapDetailTitle || !els.mapDetailBody || !detail) return;
+  const fragments = uniqueFragments(detail.commandFragments || []);
+  els.mapDetailTitle.textContent = detail.name || "Map detail";
+  els.mapDetailBody.innerHTML = `
+    <div class="map-detail-head">
+      <div>
+        <span class="map-kicker">${escapeHtml(detail.kind || "Detail")}</span>
+        <h4>${escapeHtml(detail.name || "-")}</h4>
+      </div>
+      ${detail.confidence ? `<span class="confidence-pill" title="${escapeHtml(confidenceDescription(detail.confidence))}">Confidence: ${escapeHtml(detail.confidence)}</span>` : ""}
+    </div>
+    <div class="map-detail-grid">
+      <div><strong>Type</strong><span>${escapeHtml(detail.type || "-")}</span></div>
+      <div><strong>Job</strong><span>${escapeHtml(detail.processName || "-")}</span></div>
+      <div><strong>Step</strong><span>${escapeHtml(formatStepLabel(detail))}</span></div>
+      <div><strong>DB</strong><span>${escapeHtml(detail.dbName || "-")}</span></div>
+      ${detail.parentObject ? `<div><strong>${escapeHtml(detail.parentLabel || "Called Object")}</strong><span>${escapeHtml(detail.parentObject)}</span></div>` : ""}
+      ${detail.calledObject ? `<div><strong>SQL Object</strong><span>${escapeHtml(detail.calledObject)}</span></div>` : ""}
+      ${detail.status ? `<div><strong>Status</strong><span>${escapeHtml(detail.status)}</span></div>` : ""}
+      ${detail.events ? `<div><strong>Events</strong><span>${escapeHtml(detail.events)}</span></div>` : ""}
+      ${detail.referencedColumns ? `<div><strong>Columns</strong><span>${escapeHtml(detail.referencedColumns)}</span></div>` : ""}
+    </div>
+    <div class="map-fragments">
+      <strong>${escapeHtml(detail.fragmentTitle || "Command fragments")}</strong>
+      ${
+        fragments.length > 0
+          ? fragments.map(renderCodeFragment).join("")
+          : `<div class="node-empty">No command fragment available.</div>`
+      }
+    </div>
+    ${renderMapUsedBy(detail.usedBy || [])}
+  `;
+  els.mapDetailDialog.showModal();
+}
+
+function renderMapUsedBy(usages) {
+  if (!usages.length) return "";
+  return `
+    <div class="map-used-by">
+      <strong>Used by in this map</strong>
+      <div class="map-used-by-list">
+        ${usages.map((usage) => `
+          <div class="map-used-by-item">
+            <span class="node-badge sql-object">${escapeHtml(formatObjectType(usage.objectType).badge)}</span>
+            <div>
+              <strong>${escapeHtml(usage.objectName || "-")}</strong>
+              <span>${escapeHtml(formatStepLabel(usage))}${usage.dbName ? ` · ${escapeHtml(usage.dbName)}` : ""}${usage.confidence ? ` · Confidence: ${escapeHtml(usage.confidence)}` : ""}</span>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function formatStepLabel(detail) {
+  const order = detail.stepOrder ? `Step ${detail.stepOrder}` : "Step";
+  return detail.stepName ? `${order} - ${detail.stepName}` : order;
+}
+
+function uniqueValues(values) {
+  return Array.from(new Set((values || []).filter((value) => value !== null && value !== undefined && value !== "")));
+}
+
+function truncateMiddle(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  const keep = Math.max(4, Math.floor((maxLength - 1) / 2));
+  return `${text.slice(0, keep)}…${text.slice(-keep)}`;
+}
+
+function normalizeFragment(fragment) {
+  if (fragment && typeof fragment === "object") {
+    const text = String(fragment.text || "").trim();
+    if (!text) return null;
+    return {
+      text,
+      lineNumber: fragment.lineNumber || null,
+      lineRange: fragment.lineRange || "",
+    };
+  }
+  const text = String(fragment || "").trim();
+  return text ? { text, lineNumber: null, lineRange: "" } : null;
+}
+
+function uniqueFragments(fragments) {
+  const seen = new Set();
+  const normalized = [];
+  (fragments || []).forEach((fragment) => {
+    const item = normalizeFragment(fragment);
+    if (!item) return;
+    const key = `${item.lineNumber || ""}|${item.text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    normalized.push(item);
+  });
+  return normalized;
+}
+
+function renderCodeFragment(fragment) {
+  const lineLabel = fragment.lineNumber
+    ? `Line ${fragment.lineNumber}${fragment.lineRange ? ` (${fragment.lineRange})` : ""}`
+    : "Command";
+  return `
+    <div class="code-fragment">
+      <span class="fragment-line-label">${escapeHtml(lineLabel)}</span>
+      <pre>${escapeHtml(fragment.text)}</pre>
+    </div>
+  `;
+}
+
+function extractCodeFragments(definition, schemaName, objectName) {
+  const source = String(definition || "");
+  const object = String(objectName || "").trim();
+  if (!source || !object || object.length < 2) return [];
+
+  const schema = String(schemaName || "dbo").trim() || "dbo";
+  const candidates = uniqueValues([
+    `${schema}.${object}`,
+    `[${schema}].[${object}]`,
+    `${schema}].[${object}`,
+    `[${schema}].${object}`,
+    object,
+    `[${object}]`,
+  ]).map(normalizeSqlSearchText);
+
+  const lines = source.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const fragments = [];
+  const usedRanges = new Set();
+
+  lines.forEach((line, index) => {
+    const normalizedLine = normalizeSqlSearchText(line);
+    if (!candidates.some((candidate) => candidate && normalizedLine.includes(candidate))) return;
+
+    const start = Math.max(0, index - 2);
+    const end = Math.min(lines.length - 1, index + 2);
+    const key = `${start}:${end}`;
+    if (usedRanges.has(key)) return;
+    usedRanges.add(key);
+    fragments.push({
+      text: lines.slice(start, end + 1).join("\n").trim(),
+      lineNumber: index + 1,
+      lineRange: `${start + 1}-${end + 1}`,
+    });
+  });
+
+  return fragments.slice(0, 12);
+}
+
+function normalizeSqlSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replaceAll("[", "")
+    .replaceAll("]", "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatObjectType(value) {
+  const normalized = String(value || "SQL object").replaceAll("_", " ").toLowerCase();
+  if (normalized.includes("procedure")) return { badge: "PROC", label: "Stored procedure" };
+  if (normalized.includes("view")) return { badge: "VIEW", label: "View" };
+  if (normalized.includes("function")) return { badge: "FUNC", label: "Function" };
+  if (normalized.includes("trigger")) return { badge: "TRG", label: "Trigger" };
+  if (normalized.includes("table")) return { badge: "TABLE", label: "Table" };
+  return { badge: "SQL", label: labelize(value || "SQL object") };
+}
+
+function formatTableFeatureType(feature) {
+  const kind = String(feature?.kind || "").toLowerCase();
+  if (kind === "trigger") {
+    return {
+      kind,
+      badge: "TRG",
+      label: "Trigger",
+      detailKind: "Table Trigger",
+      className: "trigger-object",
+      fragmentTitle: "Trigger definition",
+    };
+  }
+  return {
+    kind: "computed_column",
+    badge: "CALC",
+    label: "Computed column",
+    detailKind: "Computed Column",
+    className: "computed-object",
+    fragmentTitle: "Computed column expression",
+  };
+}
+
+function confidenceDescription(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized === "high") return "SQL Server catalog dependency resolved the referenced object.";
+  if (normalized === "medium") return "The SQL object was detected, but table dependency information is partial.";
+  if (normalized === "low") return "The object was parsed from job command text only.";
+  return "Detection confidence.";
 }
 
 function renderCards() {
@@ -1610,6 +2543,7 @@ els.closeTableDetail.addEventListener("click", () => els.tableDetailDialog.close
 els.closeCodeDetail.addEventListener("click", () => els.codeDetailDialog.close());
 els.closeProcessDetail.addEventListener("click", () => els.processDetailDialog.close());
 els.closeStepObjects.addEventListener("click", () => els.stepObjectsDialog.close());
+els.closeMapDetail.addEventListener("click", () => els.mapDetailDialog.close());
 els.detailTabs.forEach((tab) => {
   tab.addEventListener("click", () => renderTableDetailTab(tab.dataset.tab));
 });
