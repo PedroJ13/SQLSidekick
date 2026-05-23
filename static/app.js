@@ -62,6 +62,13 @@ const LIVE_GROUPS = [
   },
 ];
 
+const HEALTH_GROUPS = [
+  {
+    title: "Overview",
+    names: ["health_dashboard"],
+  },
+];
+
 const NAV_AREAS = [
   {
     id: "documentation",
@@ -96,8 +103,8 @@ const NAV_AREAS = [
     pill: "Health module",
     heading: "Health",
     emptyTitle: "Health checks",
-    emptyDescription: "This area will collect alerts and operational checks across documentation and process modules.",
-    groups: [],
+    emptyDescription: "Review consolidated alert status across documentation, jobs, and operational checks.",
+    groups: HEALTH_GROUPS,
   },
 ];
 
@@ -198,11 +205,22 @@ const SCRIPT_VERSION_KEY = "sqlsidekick.scriptVersion";
 const AUTO_ALERTS_KEY = "sqlsidekick.autoAlerts";
 const AGENT_CONNECTION_KEY = "sqlsidekick.agentConnection";
 const PROCESS_MAP_SELECTIONS_KEY = "sqlsidekick.processMapSelections";
+const LIVE_REFRESH_ENABLED_KEY = "sqlsidekick.liveRefreshEnabled";
+const LIVE_REFRESH_SECONDS_KEY = "sqlsidekick.liveRefreshSeconds";
 const TABLE_PAGE_SIZE = 50;
 const DEFAULT_QUERY_BY_AREA = {
   live: "live_dashboard",
   processes: "job_lineage_map",
+  health: "health_dashboard",
 };
+const HEALTH_ALERT_TARGETS = [
+  { title: "Server", category: "server" },
+  { title: "Database", category: "database" },
+  { title: "Storage", category: "storage" },
+  { title: "Structure", category: "structure" },
+  { title: "SQL Code", category: "code" },
+  { title: "Jobs", category: "processes" },
+];
 const LINEAGE_MAP_CONFIG = {
   job_lineage_map: {
     mapType: "jobs",
@@ -254,6 +272,7 @@ const GROUP_CATEGORY_SLUGS = {
   "DB Users / Roles": "security",
   "SQL Agent Jobs": "jobs",
   Jobs: "processes",
+  Security: "security",
   Analysis: "analysis",
   Operations: "operations",
   Additional: "additional",
@@ -261,6 +280,7 @@ const GROUP_CATEGORY_SLUGS = {
   Processes: "processes",
   Lineage: "lineage",
   Live: "live",
+  Overview: "health",
   Health: "health",
 };
 
@@ -278,7 +298,12 @@ const state = {
   failedQueries: new Map(),
   scriptVersion: loadScriptVersion(),
   autoAlerts: loadAutoAlerts(),
+  liveRefreshEnabled: loadLiveRefreshEnabled(),
+  liveRefreshSeconds: loadLiveRefreshSeconds(),
+  liveRefreshTimer: null,
+  liveRefreshRunning: false,
   agentConnection: loadAgentConnection(),
+  healthResults: [],
   alertsSweepId: 0,
   alertsByCategory: {},
   alerts: {
@@ -367,6 +392,8 @@ const els = {
   closeSettings: document.querySelector("#closeSettings"),
   scriptVersionInputs: document.querySelectorAll('input[name="scriptVersion"]'),
   autoAlertsInput: document.querySelector("#autoAlerts"),
+  liveRefreshEnabledInput: document.querySelector("#liveRefreshEnabled"),
+  liveRefreshSecondsInput: document.querySelector("#liveRefreshSeconds"),
   agentCredentialsEnabled: document.querySelector("#agentCredentialsEnabled"),
   agentDatabase: document.querySelector("#agentDatabase"),
   agentUsername: document.querySelector("#agentUsername"),
@@ -421,6 +448,16 @@ function loadAutoAlerts() {
   return localStorage.getItem(AUTO_ALERTS_KEY) === "true";
 }
 
+function loadLiveRefreshEnabled() {
+  return localStorage.getItem(LIVE_REFRESH_ENABLED_KEY) === "true";
+}
+
+function loadLiveRefreshSeconds() {
+  const value = Number(localStorage.getItem(LIVE_REFRESH_SECONDS_KEY) || 30);
+  if (!Number.isFinite(value)) return 30;
+  return Math.min(300, Math.max(5, Math.round(value)));
+}
+
 function loadAgentConnection() {
   try {
     const raw = localStorage.getItem(AGENT_CONNECTION_KEY);
@@ -470,6 +507,16 @@ function saveAutoAlerts(enabled) {
   }
 }
 
+function saveLiveRefreshSettings() {
+  state.liveRefreshEnabled = Boolean(els.liveRefreshEnabledInput?.checked);
+  const seconds = Number(els.liveRefreshSecondsInput?.value || state.liveRefreshSeconds || 30);
+  state.liveRefreshSeconds = Number.isFinite(seconds) ? Math.min(300, Math.max(5, Math.round(seconds))) : 30;
+  localStorage.setItem(LIVE_REFRESH_ENABLED_KEY, state.liveRefreshEnabled ? "true" : "false");
+  localStorage.setItem(LIVE_REFRESH_SECONDS_KEY, String(state.liveRefreshSeconds));
+  updateLiveRefreshInputs();
+  scheduleLiveRefresh();
+}
+
 function saveScriptVersion(version) {
   state.scriptVersion = ["light", "full"].includes(version) ? version : "full";
   localStorage.setItem(SCRIPT_VERSION_KEY, state.scriptVersion);
@@ -485,6 +532,16 @@ function updateScriptVersionInputs() {
 function updateAutoAlertsInput() {
   if (els.autoAlertsInput) {
     els.autoAlertsInput.checked = state.autoAlerts;
+  }
+}
+
+function updateLiveRefreshInputs() {
+  if (els.liveRefreshEnabledInput) {
+    els.liveRefreshEnabledInput.checked = state.liveRefreshEnabled;
+  }
+  if (els.liveRefreshSecondsInput) {
+    els.liveRefreshSecondsInput.value = String(state.liveRefreshSeconds);
+    els.liveRefreshSecondsInput.disabled = !state.liveRefreshEnabled;
   }
 }
 
@@ -573,6 +630,7 @@ function goToApp() {
 }
 
 function goToConnection() {
+  clearLiveRefreshTimer();
   els.appPage.classList.add("hidden");
   els.connectionPage.classList.remove("hidden");
 }
@@ -675,6 +733,7 @@ function renderModuleTabs() {
 
 async function switchArea(areaId) {
   if (state.activeArea === areaId) return;
+  clearLiveRefreshTimer();
   state.activeArea = areaId;
   state.activeQuery = null;
   state.rows = [];
@@ -685,6 +744,7 @@ async function switchArea(areaId) {
   renderQueryMenu();
   resetWorkspace();
   await runDefaultQueryForArea(areaId);
+  scheduleLiveRefresh();
 }
 
 function getActiveArea() {
@@ -804,7 +864,7 @@ async function runAlertCheck(groupTitle, sweepId = state.alertsSweepId) {
     return;
   }
   const category = groupCategorySlug(groupTitle);
-  if (!category || category === "additional" || category === "documentation") {
+  if (!category || ["additional", "documentation", "health", "live"].includes(category)) {
     return;
   }
 
@@ -848,7 +908,7 @@ function groupCategorySlug(groupTitle) {
 function getAlertableGroups() {
   return getAllQueryGroups().filter((group) => {
     const category = groupCategorySlug(group.title);
-    if (!category || category === "additional" || category === "documentation") return false;
+    if (!category || ["additional", "documentation", "health", "live"].includes(category)) return false;
     return group.names.some((name) => state.queries.some((query) => query.name === name));
   });
 }
@@ -1013,6 +1073,7 @@ async function testConnection(event) {
 
 async function runActiveQuery() {
   if (!state.activeQuery || !state.connection) return;
+  clearLiveRefreshTimer();
   clearMessage(els.message);
   els.cardView.classList.add("hidden");
   els.tableWrap.classList.remove("hidden");
@@ -1022,6 +1083,10 @@ async function runActiveQuery() {
   try {
     if (LINEAGE_MAP_CONFIG[state.activeQuery.name]) {
       await runProcessLineageMap();
+      return;
+    }
+    if (isHealthQuery()) {
+      await runHealthView();
       return;
     }
     const isMixedLineage = shouldUseMixedLineageQuery();
@@ -1066,6 +1131,32 @@ async function runActiveQuery() {
   }
 }
 
+function isLiveQuery(queryName = state.activeQuery?.name) {
+  return String(queryName || "").startsWith("live_");
+}
+
+function clearLiveRefreshTimer() {
+  if (!state.liveRefreshTimer) return;
+  clearTimeout(state.liveRefreshTimer);
+  state.liveRefreshTimer = null;
+}
+
+function scheduleLiveRefresh() {
+  clearLiveRefreshTimer();
+  if (!state.liveRefreshEnabled || !state.connected || state.activeArea !== "live" || !isLiveQuery()) {
+    return;
+  }
+  state.liveRefreshTimer = setTimeout(async () => {
+    if (state.liveRefreshRunning) return;
+    state.liveRefreshRunning = true;
+    try {
+      await runActiveQuery();
+    } finally {
+      state.liveRefreshRunning = false;
+    }
+  }, state.liveRefreshSeconds * 1000);
+}
+
 function markQueryFailed(queryName, reason) {
   state.failedQueries.set(queryName, reason || "Query failed.");
   const button = Array.from(document.querySelectorAll(".query-item")).find((item) => item.dataset.name === queryName);
@@ -1078,6 +1169,194 @@ function markQueryFailed(queryName, reason) {
   if (state.activeQuery?.name === queryName) {
     els.runQuery.disabled = true;
   }
+}
+
+function isHealthQuery() {
+  return state.activeQuery?.name === "health_dashboard";
+}
+
+async function runHealthView() {
+  const healthResults = await fetchHealthAlerts();
+  state.healthResults = healthResults;
+  state.columns = [];
+  state.rows = [];
+  els.message.classList.add("hidden");
+  els.tableTools.classList.add("hidden");
+  els.tableWrap.classList.add("hidden");
+  els.pagination.classList.add("hidden");
+  els.exportCsv.disabled = true;
+  els.rowCount.textContent = String(healthResults.reduce((sum, result) => sum + result.rows.length, 0));
+  els.columnCount.textContent = String(HEALTH_ALERT_TARGETS.length);
+  els.cardView.classList.remove("hidden");
+  els.cardView.innerHTML = renderHealthDashboard(healthResults);
+  bindHealthDashboardControls();
+  clearMessage(els.message);
+}
+
+async function fetchHealthAlerts() {
+  const results = await Promise.all(
+    HEALTH_ALERT_TARGETS.map(async (target) => {
+      try {
+        const payload = await api("/api/run-alerts", {
+          method: "POST",
+          body: JSON.stringify({
+            connection: target.category === "processes" && shouldUseAgentConnection() ? getQueryConnection(true) : state.connection,
+            category: target.category,
+          }),
+        });
+        const resultSet = payload.resultSets?.[0] || { columns: [], rows: [] };
+        state.alertsByCategory[target.category] = {
+          groupTitle: target.title,
+          category: target.category,
+          rows: resultSet.rows || [],
+          columns: resultSet.columns || [],
+          error: "",
+        };
+        return {
+          ...target,
+          rows: resultSet.rows || [],
+          columns: resultSet.columns || [],
+          error: "",
+        };
+      } catch (error) {
+        state.alertsByCategory[target.category] = {
+          groupTitle: target.title,
+          category: target.category,
+          rows: [],
+          columns: [],
+          error: error.message,
+        };
+        return { ...target, rows: [], columns: [], error: error.message };
+      }
+    })
+  );
+  renderGroupAlertBadges();
+  setCurrentAlertsFromGroup(state.activeGroup);
+  return results;
+}
+
+function renderHealthDashboard(results) {
+  const totalAlerts = results.reduce((sum, result) => sum + result.rows.length, 0);
+  const highAlerts = countHealthSeverity(results, "high");
+  const mediumAlerts = countHealthSeverity(results, "medium");
+  const lowAlerts = countHealthSeverity(results, "low");
+  const failedChecks = results.filter((result) => result.error).length;
+  const overallSeverity = failedChecks > 0 ? "unknown" : highAlerts > 0 ? "high" : mediumAlerts > 0 ? "medium" : lowAlerts > 0 ? "low" : "good";
+  const statusText = failedChecks > 0
+    ? `${failedChecks} health check(s) could not run.`
+    : totalAlerts > 0
+      ? `${totalAlerts} active alert(s) detected.`
+      : "No active basic alerts detected.";
+  return `
+    <section class="health-summary health-${escapeHtml(overallSeverity)}">
+      <div>
+        <span class="health-eyebrow">Overall status</span>
+        <strong>${escapeHtml(formatHealthStatus(overallSeverity))}</strong>
+        <p>${escapeHtml(statusText)}</p>
+      </div>
+      <div class="health-summary-actions">
+        <button class="health-view-all" type="button" data-health-all title="View all alerts" aria-label="View all alerts">
+          <span aria-hidden="true">i</span>
+        </button>
+        <div class="health-totals">
+          ${renderHealthTotal("High", highAlerts, "high")}
+          ${renderHealthTotal("Medium", mediumAlerts, "medium")}
+          ${renderHealthTotal("Low", lowAlerts, "low")}
+        </div>
+      </div>
+    </section>
+    <section class="health-category-grid">
+      ${results.map((result) => renderHealthCategoryCard(result)).join("")}
+    </section>
+  `;
+}
+
+function renderHealthTotal(label, count, severity) {
+  return `
+    <button class="health-total severity-${escapeHtml(severity)}" type="button" data-health-severity="${escapeHtml(severity)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)} alerts: ${escapeHtml(count)}">
+      <strong>${escapeHtml(count)}</strong>
+    </button>
+  `;
+}
+
+function renderHealthCategoryCard(result) {
+  const severity = result.error ? "unknown" : getHighestAlertSeverity(result);
+  const count = result.rows.length;
+  const status = result.error ? "Check failed" : "OK";
+  const topAlert = result.error || result.rows[0]?.alert_name || "No active alerts.";
+  return `
+    <button class="health-category-card health-${escapeHtml(severity)}" type="button" data-health-category="${escapeHtml(result.category)}" title="View ${escapeHtml(result.title)} alerts">
+      <div class="health-card-head">
+        <span class="health-dot severity-${escapeHtml(severity)}"></span>
+        <strong>${escapeHtml(result.title)}${count > 0 ? ` (${escapeHtml(count)})` : ""}</strong>
+      </div>
+      <p>${escapeHtml(result.error ? status : topAlert)}</p>
+    </button>
+  `;
+}
+
+function bindHealthDashboardControls() {
+  els.cardView.querySelectorAll("[data-health-category]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const category = button.dataset.healthCategory;
+      const result = state.healthResults.find((item) => item.category === category);
+      if (!result) return;
+      openHealthAlerts(result.title, [result]);
+    });
+  });
+  els.cardView.querySelectorAll("[data-health-severity]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const severity = button.dataset.healthSeverity;
+      openHealthAlerts(labelize(severity), state.healthResults, severity);
+    });
+  });
+  const allButton = els.cardView.querySelector("[data-health-all]");
+  if (allButton) {
+    allButton.addEventListener("click", () => openHealthAlerts("All health", state.healthResults));
+  }
+}
+
+function openHealthAlerts(title, results, severity = "") {
+  const rows = results.flatMap((result) =>
+    result.rows
+      .filter((row) => !severity || normalizeAlertSeverity(row.severity) === severity)
+      .map((row) => ({
+        source_area: result.title,
+        ...row,
+      }))
+  );
+  const columns = getHealthAlertColumns(rows);
+  state.alerts = {
+    groupTitle: title,
+    category: "health",
+    rows,
+    columns,
+    error: "",
+  };
+  openAlertsPanel();
+}
+
+function getHealthAlertColumns(rows) {
+  const orderedColumns = ["source_area", "severity", "alert_category", "alert_name", "active_count"];
+  const extraColumns = Array.from(new Set(rows.flatMap((row) => Object.keys(row)))).filter(
+    (column) => !orderedColumns.includes(column)
+  );
+  return orderedColumns.filter((column) => rows.some((row) => Object.hasOwn(row, column))).concat(extraColumns);
+}
+
+function countHealthSeverity(results, severity) {
+  return results.reduce(
+    (sum, result) => sum + result.rows.filter((row) => normalizeAlertSeverity(row.severity) === severity).length,
+    0
+  );
+}
+
+function formatHealthStatus(severity) {
+  if (severity === "high") return "Needs attention";
+  if (severity === "medium") return "Review soon";
+  if (severity === "low") return "Minor findings";
+  if (severity === "unknown") return "Incomplete";
+  return "Healthy";
 }
 
 function resetWorkspace() {
@@ -1107,10 +1386,12 @@ function renderResults() {
     els.rowCount.textContent = "0";
     els.columnCount.textContent = String(state.columns.length);
     renderEmptyTable("No rows to display.");
+    scheduleLiveRefresh();
     return;
   }
   if (state.rows.length <= 1 && shouldRenderSingleRowAsCard()) {
     renderCards();
+    scheduleLiveRefresh();
     return;
   }
   els.message.classList.remove("hidden");
@@ -1118,6 +1399,7 @@ function renderResults() {
   els.cardView.classList.add("hidden");
   els.tableWrap.classList.remove("hidden");
   renderTable();
+  scheduleLiveRefresh();
 }
 
 function shouldRenderSingleRowAsCard() {
@@ -2095,6 +2377,12 @@ function renderCards() {
       metric.className = "multirow-metric";
       if (field === "traffic_light") metric.classList.add("traffic-light-metric");
       if (field === "pressure_level") metric.classList.add("pressure-thermometer-metric");
+      const liveTarget = liveDashboardTargetForField(field, row);
+      if (liveTarget) {
+        metric.classList.add("live-dashboard-link");
+        metric.dataset.liveTarget = liveTarget;
+        metric.title = `Open ${labelize(liveTarget)}`;
+      }
       const gaugeClass = dashboardGaugeClass(field);
       if (gaugeClass) {
         metric.classList.add("dashboard-gauge-metric", gaugeClass);
@@ -2118,6 +2406,44 @@ function renderCards() {
       els.cardView.appendChild(section);
     }
   });
+  if (state.activeQuery?.name === "live_dashboard") {
+    bindLiveDashboardControls();
+  }
+}
+
+function bindLiveDashboardControls() {
+  els.cardView.querySelectorAll("[data-live-target]").forEach((item) => {
+    item.addEventListener("click", () => {
+      const queryName = item.dataset.liveTarget;
+      const group = getVisibleGroups(getActiveArea()).find((candidate) => candidate.names.includes(queryName));
+      if (!queryName || !group) return;
+      selectAndRunQuery(queryName, group.title);
+    });
+  });
+}
+
+function liveDashboardTargetForField(field, row) {
+  if (state.activeQuery?.name !== "live_dashboard") return "";
+  const directTargets = {
+    active_requests: "live_current_requests",
+    long_running_requests: "live_current_requests",
+    active_waits: "live_active_waits",
+    blocked_sessions: "live_blocking",
+    root_blockers: "live_root_blockers",
+    tempdb_sessions: "live_tempdb_usage",
+    max_tempdb_mb: "live_tempdb_usage",
+    log_used_percent: "live_log_usage",
+  };
+  if (directTargets[field]) return directTargets[field];
+  if (["pressure_level", "status_summary"].includes(field)) {
+    if (Number(row.blocked_sessions || 0) > 0) return "live_blocking";
+    if (Number(row.root_blockers || 0) > 0) return "live_root_blockers";
+    if (Number(row.active_waits || 0) > 0) return "live_active_waits";
+    if (Number(row.long_running_requests || 0) > 0 || Number(row.active_requests || 0) > 0) return "live_current_requests";
+    if (Number(row.max_tempdb_mb || 0) >= 256 || Number(row.tempdb_sessions || 0) > 0) return "live_tempdb_usage";
+    if (Number(row.log_used_percent || 0) >= 75) return "live_log_usage";
+  }
+  return "";
 }
 
 function renderCardTitleIndicator(group, row) {
@@ -2755,6 +3081,7 @@ els.processDetailTabs.forEach((tab) => {
 els.openSettings.addEventListener("click", () => {
   updateScriptVersionInputs();
   updateAutoAlertsInput();
+  updateLiveRefreshInputs();
   updateAgentConnectionInputs();
   els.settingsDialog.showModal();
 });
@@ -2765,6 +3092,8 @@ els.autoAlertsInput.addEventListener("change", () => {
     runAllAlerts();
   }
 });
+els.liveRefreshEnabledInput.addEventListener("change", saveLiveRefreshSettings);
+els.liveRefreshSecondsInput.addEventListener("input", saveLiveRefreshSettings);
 els.agentCredentialsEnabled.addEventListener("change", saveAgentConnection);
 els.agentDatabase.addEventListener("input", saveAgentConnection);
 els.agentUsername.addEventListener("input", saveAgentConnection);
@@ -2796,6 +3125,7 @@ async function initializeApp() {
   updateAuthFields();
   updateScriptVersionInputs();
   updateAutoAlertsInput();
+  updateLiveRefreshInputs();
   updateAgentConnectionInputs();
   loadConnectionDraft();
   await loadDefaultConnection();

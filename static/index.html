@@ -256,6 +256,19 @@
           </label>
         </section>
         <section>
+          <h3>Live auto refresh</h3>
+          <p>Refresh the active Live check automatically while the Live module is open.</p>
+          <label class="switch-row">
+            <input id="liveRefreshEnabled" type="checkbox" />
+            <span>Auto-refresh Live checks</span>
+          </label>
+          <label class="settings-number-row">
+            Every
+            <input id="liveRefreshSeconds" type="number" min="5" max="300" step="5" />
+            seconds
+          </label>
+        </section>
+        <section>
           <h3>SQL Agent credentials</h3>
           <p>Use a dedicated login for Jobs and lineage queries that need SQL Agent metadata access.</p>
           <label class="switch-row">
