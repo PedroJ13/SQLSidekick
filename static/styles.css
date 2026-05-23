@@ -856,11 +856,37 @@ button:disabled {
 }
 
 .multirow-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 0 0 14px;
   color: var(--brand);
   font-size: 22px;
   line-height: 1.15;
   font-weight: 700;
+}
+
+.title-traffic-light {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #94a3b8;
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.78), 0 0 0 4px rgba(148, 163, 184, 0.14);
+}
+
+.title-traffic-light.metric-good {
+  background: #22c55e;
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.78), 0 0 0 4px rgba(34, 197, 94, 0.16);
+}
+
+.title-traffic-light.metric-warning {
+  background: #f59e0b;
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.78), 0 0 0 4px rgba(245, 158, 11, 0.18);
+}
+
+.title-traffic-light.metric-critical {
+  background: #dc2626;
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.78), 0 0 0 4px rgba(220, 38, 38, 0.18);
 }
 
 .process-map,
@@ -1573,6 +1599,9 @@ button:disabled {
 
 .multirow-metric {
   min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
 }
 
 .multirow-metric strong {
@@ -1597,6 +1626,194 @@ button:disabled {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.25;
+}
+
+.multirow-metric.metric-good {
+  background: #eef9f2;
+  border-color: #b8e2c6;
+}
+
+.multirow-metric.metric-good strong {
+  color: #176b3a;
+}
+
+.multirow-metric.metric-warning {
+  background: #fff7e8;
+  border-color: #f4d59b;
+}
+
+.multirow-metric.metric-warning strong {
+  color: #9a5f00;
+}
+
+.multirow-metric.metric-critical {
+  background: #fff0f0;
+  border-color: #efb7b7;
+}
+
+.multirow-metric.metric-critical strong {
+  color: #a43131;
+}
+
+.traffic-light-metric {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+  min-height: 84px;
+}
+
+.traffic-light-metric strong {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  color: transparent;
+  font-size: 0;
+  box-shadow: inset 0 0 0 4px rgba(255, 255, 255, 0.72), 0 8px 18px rgba(15, 23, 42, 0.12);
+}
+
+.traffic-light-metric span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.pressure-thermometer-metric {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 14px;
+  min-height: 84px;
+}
+
+.pressure-thermometer-metric::before {
+  content: "";
+  width: 20px;
+  height: 62px;
+  border: 3px solid #d5e0e8;
+  border-radius: 999px;
+  background: linear-gradient(to top, var(--thermo-color, #22c55e) var(--thermo-fill, 28%), #f8fafc var(--thermo-fill, 28%));
+  box-shadow: inset 0 0 0 3px #fff, 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.pressure-thermometer-metric strong {
+  font-size: 22px;
+}
+
+.pressure-thermometer-metric span {
+  margin-top: 0;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.pressure-thermometer-metric.metric-good {
+  --thermo-color: #22c55e;
+  --thermo-fill: 30%;
+}
+
+.pressure-thermometer-metric.metric-warning {
+  --thermo-color: #f59e0b;
+  --thermo-fill: 62%;
+}
+
+.pressure-thermometer-metric.metric-critical {
+  --thermo-color: #dc2626;
+  --thermo-fill: 92%;
+}
+
+.traffic-light-metric.metric-good strong {
+  background: #22c55e;
+}
+
+.traffic-light-metric.metric-warning strong {
+  background: #f59e0b;
+}
+
+.traffic-light-metric.metric-critical strong {
+  background: #dc2626;
+}
+
+.dashboard-gauge-metric {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  justify-items: center;
+  align-content: end;
+  min-height: 150px;
+  padding: 98px 12px 14px;
+}
+
+.dashboard-gauge-metric::before {
+  content: "";
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  width: min(160px, calc(100% - 34px));
+  aspect-ratio: 2 / 1;
+  transform: translateX(-50%);
+  border-radius: 999px 999px 0 0;
+  background:
+    radial-gradient(circle at 50% 100%, #fff 0 38%, transparent 39%),
+    conic-gradient(from 270deg at 50% 100%, #fb6b4b 0deg 58deg, #ffd91d 58deg 122deg, #35d0bf 122deg 180deg, transparent 180deg 360deg);
+  filter: drop-shadow(0 8px 14px rgba(15, 23, 42, 0.08));
+}
+
+.dashboard-gauge-metric::after {
+  content: "";
+  position: absolute;
+  top: 84px;
+  left: 50%;
+  width: min(62px, calc(50% - 32px));
+  height: 4px;
+  border-radius: 999px;
+  background: #2a3540;
+  transform: rotate(var(--gauge-angle, -90deg));
+  transform-origin: left center;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.24);
+}
+
+.dashboard-gauge-metric strong {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  font-size: 16px;
+}
+
+.dashboard-gauge-metric strong::before {
+  content: "";
+  position: absolute;
+  top: -26px;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #2a3540;
+  transform: translateX(-50%);
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.9);
+}
+
+.dashboard-gauge-metric span {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+}
+
+.dashboard-gauge-metric.metric-good {
+  --gauge-color: #22c55e;
+}
+
+.dashboard-gauge-metric.metric-warning {
+  --gauge-color: #f59e0b;
+}
+
+.dashboard-gauge-metric.metric-critical {
+  --gauge-color: #dc2626;
 }
 
 .card-empty {

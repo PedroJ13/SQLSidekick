@@ -47,10 +47,18 @@ const PROCESS_GROUPS = [
   },
 ];
 
-const LINEAGE_GROUPS = [
+const LIVE_GROUPS = [
   {
-    title: "Lineage",
-    names: ["object_references", "table_usage", "process_lineage", "used_by_jobs"],
+    title: "Dashboard",
+    names: ["live_dashboard"],
+  },
+  {
+    title: "Current activity",
+    names: ["live_current_requests", "live_session_resource_usage", "live_blocking", "live_root_blockers", "live_active_waits"],
+  },
+  {
+    title: "Resource pressure",
+    names: ["live_tempdb_usage", "live_log_usage"],
   },
 ];
 
@@ -74,13 +82,13 @@ const NAV_AREAS = [
     groups: PROCESS_GROUPS,
   },
   {
-    id: "lineage",
-    title: "Lineage",
-    pill: "Lineage module",
-    heading: "Lineage",
-    emptyTitle: "Choose a lineage section",
-    emptyDescription: "Review object dependencies, table usage, and initial process lineage before moving to graph views.",
-    groups: LINEAGE_GROUPS,
+    id: "live",
+    title: "Live",
+    pill: "Live monitor",
+    heading: "Live monitor",
+    emptyTitle: "Choose a live check",
+    emptyDescription: "Run online checks for current requests, blocking, waits, tempdb usage, and log pressure.",
+    groups: LIVE_GROUPS,
   },
   {
     id: "health",
@@ -94,6 +102,20 @@ const NAV_AREAS = [
 ];
 
 const CARD_GROUPS = {
+  live_dashboard: [
+    {
+      title: "Current status",
+      fields: ["traffic_light", "pressure_level", "status_summary", "checked_at"],
+    },
+    {
+      title: "Activity",
+      fields: ["active_requests", "long_running_requests", "active_waits", "blocked_sessions", "root_blockers"],
+    },
+    {
+      title: "Resource pressure",
+      fields: ["tempdb_sessions", "max_tempdb_mb", "log_used_percent"],
+    },
+  ],
   server_overview: [
     {
       title: "Identity",
@@ -177,6 +199,10 @@ const AUTO_ALERTS_KEY = "sqlsidekick.autoAlerts";
 const AGENT_CONNECTION_KEY = "sqlsidekick.agentConnection";
 const PROCESS_MAP_SELECTIONS_KEY = "sqlsidekick.processMapSelections";
 const TABLE_PAGE_SIZE = 50;
+const DEFAULT_QUERY_BY_AREA = {
+  live: "live_dashboard",
+  processes: "job_lineage_map",
+};
 const LINEAGE_MAP_CONFIG = {
   job_lineage_map: {
     mapType: "jobs",
@@ -234,6 +260,7 @@ const GROUP_CATEGORY_SLUGS = {
   Documentation: "documentation",
   Processes: "processes",
   Lineage: "lineage",
+  Live: "live",
   Health: "health",
 };
 
@@ -639,12 +666,14 @@ function renderModuleTabs() {
     button.dataset.area = area.id;
     button.textContent = area.title;
     button.classList.toggle("active", area.id === state.activeArea);
-    button.addEventListener("click", () => switchArea(area.id));
+    button.addEventListener("click", () => {
+      switchArea(area.id);
+    });
     els.moduleTabs.appendChild(button);
   });
 }
 
-function switchArea(areaId) {
+async function switchArea(areaId) {
   if (state.activeArea === areaId) return;
   state.activeArea = areaId;
   state.activeQuery = null;
@@ -655,6 +684,7 @@ function switchArea(areaId) {
   renderModuleTabs();
   renderQueryMenu();
   resetWorkspace();
+  await runDefaultQueryForArea(areaId);
 }
 
 function getActiveArea() {
@@ -667,6 +697,15 @@ function getAllQueryGroups() {
 
 function getVisibleGroups(area = getActiveArea()) {
   return area.groups.filter((group) => group.names.some((name) => state.queries.some((query) => query.name === name)));
+}
+
+async function runDefaultQueryForArea(areaId) {
+  if (!state.connected) return;
+  const defaultName = DEFAULT_QUERY_BY_AREA[areaId];
+  if (!defaultName || !state.queries.some((query) => query.name === defaultName)) return;
+  const group = getVisibleGroups(getActiveArea()).find((item) => item.names.includes(defaultName));
+  if (!group) return;
+  await selectAndRunQuery(defaultName, group.title);
 }
 
 function updateAreaChrome(area = getActiveArea()) {
@@ -2044,19 +2083,32 @@ function renderCards() {
     section.className = "multirow-card";
     const title = document.createElement("h3");
     title.textContent = group.title;
+    const titleIndicator = renderCardTitleIndicator(group, row);
+    if (titleIndicator) title.appendChild(titleIndicator);
     const metrics = document.createElement("div");
     metrics.className = "multirow-metrics";
 
     group.fields.forEach((field) => {
       if (!state.columns.includes(field)) return;
+      if (state.activeQuery?.name === "live_dashboard" && field === "traffic_light") return;
       const metric = document.createElement("div");
       metric.className = "multirow-metric";
+      if (field === "traffic_light") metric.classList.add("traffic-light-metric");
+      if (field === "pressure_level") metric.classList.add("pressure-thermometer-metric");
+      const gaugeClass = dashboardGaugeClass(field);
+      if (gaugeClass) {
+        metric.classList.add("dashboard-gauge-metric", gaugeClass);
+        metric.style.setProperty("--gauge-fill", dashboardGaugeFill(field, row[field]));
+        metric.style.setProperty("--gauge-angle", dashboardGaugeAngle(field, row[field]));
+      }
+      const statusClass = dashboardStatusClass(field, row[field]);
+      if (statusClass) metric.classList.add(statusClass);
       const value = document.createElement("strong");
       value.textContent = formatValue(row[field]);
       value.title = value.textContent;
       value.className = value.textContent.length > 20 ? "compact-value" : "";
       const label = document.createElement("span");
-      label.textContent = labelize(field);
+      label.textContent = field === "traffic_light" ? "Traffic Light" : labelize(field);
       metric.append(value, label);
       metrics.appendChild(metric);
     });
@@ -2068,10 +2120,68 @@ function renderCards() {
   });
 }
 
+function renderCardTitleIndicator(group, row) {
+  if (state.activeQuery?.name !== "live_dashboard" || !group.fields.includes("traffic_light")) return null;
+  const indicator = document.createElement("span");
+  indicator.className = `title-traffic-light ${dashboardStatusClass("traffic_light", row.traffic_light) || ""}`;
+  indicator.title = `Traffic Light: ${formatValue(row.traffic_light)}`;
+  indicator.setAttribute("aria-label", `Traffic Light: ${formatValue(row.traffic_light)}`);
+  return indicator;
+}
+
 function getCardGroups() {
   const configured = CARD_GROUPS[state.activeQuery?.name] || [];
   if (configured.length > 0) return configured;
   return [{ title: "Details", fields: state.columns }];
+}
+
+function dashboardStatusClass(field, value) {
+  const fieldName = String(field || "").toLowerCase();
+  const numericValue = Number(value);
+  if (fieldName === "log_used_percent" && Number.isFinite(numericValue)) {
+    if (numericValue >= 90) return "metric-critical";
+    if (numericValue >= 75) return "metric-warning";
+    return "metric-good";
+  }
+  if (fieldName === "max_tempdb_mb" && Number.isFinite(numericValue)) {
+    if (numericValue >= 1024) return "metric-critical";
+    if (numericValue >= 256) return "metric-warning";
+    return "metric-good";
+  }
+  if (fieldName === "tempdb_sessions" && Number.isFinite(numericValue)) {
+    if (numericValue >= 10) return "metric-critical";
+    if (numericValue >= 3) return "metric-warning";
+    return "metric-good";
+  }
+  if (!fieldName.includes("status") && !fieldName.includes("level") && !fieldName.includes("traffic_light")) {
+    return "";
+  }
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["red", "critical", "high", "error", "permission"].includes(normalized)) return "metric-critical";
+  if (["yellow", "warning", "medium"].includes(normalized)) return "metric-warning";
+  if (["green", "good", "low", "ok", "normal"].includes(normalized)) return "metric-good";
+  return "";
+}
+
+function dashboardGaugeClass(field) {
+  const name = String(field || "").toLowerCase();
+  if (["tempdb_sessions", "max_tempdb_mb", "log_used_percent"].includes(name)) return `gauge-${name.replaceAll("_", "-")}`;
+  return "";
+}
+
+function dashboardGaugeFill(field, value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) return "4%";
+  if (field === "log_used_percent") return `${Math.max(4, Math.min(100, numericValue))}%`;
+  if (field === "max_tempdb_mb") return `${Math.max(4, Math.min(100, (numericValue / 1024) * 100))}%`;
+  if (field === "tempdb_sessions") return `${Math.max(4, Math.min(100, numericValue * 10))}%`;
+  return "4%";
+}
+
+function dashboardGaugeAngle(field, value) {
+  const fill = Number.parseFloat(dashboardGaugeFill(field, value));
+  const clamped = Number.isFinite(fill) ? Math.max(0, Math.min(100, fill)) : 0;
+  return `${-90 + (clamped * 1.8)}deg`;
 }
 
 function renderTable() {
@@ -2204,6 +2314,14 @@ function getDefaultFilterColumn() {
     table_usage: ["table_name", "used_by_object", "table_schema"],
     process_lineage: ["process_name", "called_object_name", "referenced_object"],
     used_by_jobs: ["referenced_object", "process_name", "called_object_name"],
+    live_dashboard: ["traffic_light", "pressure_level", "status_summary"],
+    live_current_requests: ["session_id", "database_name", "login_name", "program_name", "wait_type"],
+    live_session_resource_usage: ["session_id", "database_name", "login_name", "program_name"],
+    live_blocking: ["session_id", "blocking_session_id", "database_name", "wait_type"],
+    live_root_blockers: ["blocking_session_id", "login_name", "program_name"],
+    live_active_waits: ["session_id", "database_name", "wait_type", "login_name"],
+    live_tempdb_usage: ["session_id", "database_name", "login_name", "program_name"],
+    live_log_usage: ["database_name", "pressure_level"],
   };
   const candidates = preferredByQuery[state.activeQuery?.name] || [];
   return candidates.find((column) => state.columns.includes(column)) || inferNameColumn();
