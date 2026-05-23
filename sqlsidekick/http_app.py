@@ -706,9 +706,9 @@ BEGIN TRY
         resolved.is_resolved,
         resolved.has_dynamic_sql,
         CASE
-            WHEN resolved.called_object_id IS NULL THEN N'Called object was parsed from command text but was not resolved in this database.'
-            WHEN resolved.called_definition IS NULL THEN N'Object exists, but definition is not visible or is encrypted; catalog dependency coverage may be partial.'
-            WHEN resolved.has_dynamic_sql = 1 THEN N'Dynamic SQL indicators detected; referenced objects may be incomplete.'
+            WHEN resolved.called_object_id IS NULL THEN N'Object was detected in command text, but it was not resolved in this database.'
+            WHEN resolved.called_definition IS NULL THEN N'Object exists, but its definition is not visible or is encrypted; dependency coverage may be partial.'
+            WHEN resolved.has_dynamic_sql = 1 THEN N'Dynamic SQL detected; referenced objects may be incomplete.'
             ELSE NULL
         END AS lineage_note,
         CASE
@@ -743,7 +743,7 @@ BEGIN CATCH
         N'Dependency metadata not visible' AS resolution_status,
         is_resolved,
         has_dynamic_sql,
-        CONCAT(N'Could not read SQL dependency metadata: ', ERROR_MESSAGE()) AS lineage_note,
+        CONCAT(N'Dependency metadata could not be read: ', ERROR_MESSAGE()) AS lineage_note,
         'Low' AS confidence
     FROM #resolved AS resolved;
 END CATCH;
@@ -768,10 +768,10 @@ BEGIN TRY
         resolved.is_resolved,
         resolved.has_dynamic_sql,
         CASE
-            WHEN resolved.called_object_id IS NULL THEN N'Called object was parsed from command text but was not resolved in this database.'
-            WHEN resolved.called_definition IS NULL THEN N'Object exists, but definition is not visible or is encrypted; catalog dependency coverage may be partial.'
-            WHEN resolved.has_dynamic_sql = 1 THEN N'Dynamic SQL indicators detected; referenced objects may be incomplete.'
-            WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NULL THEN N'No catalog dependencies returned; temp tables, permissions, or dynamic SQL may hide references.'
+            WHEN resolved.called_object_id IS NULL THEN N'Object was detected in command text, but it was not resolved in this database.'
+            WHEN resolved.called_definition IS NULL THEN N'Object exists, but its definition is not visible or is encrypted; dependency coverage may be partial.'
+            WHEN resolved.has_dynamic_sql = 1 THEN N'Dynamic SQL detected; referenced objects may be incomplete.'
+            WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NULL THEN N'No catalog dependencies were returned; temp tables, permissions, or dynamic SQL may hide references.'
             ELSE NULL
         END AS lineage_note,
         CASE
@@ -805,7 +805,7 @@ BEGIN CATCH
         N'Dependency metadata not visible' AS resolution_status,
         is_resolved,
         has_dynamic_sql,
-        CONCAT(N'Could not read SQL dependency metadata: ', ERROR_MESSAGE()) AS lineage_note,
+        CONCAT(N'Dependency metadata could not be read: ', ERROR_MESSAGE()) AS lineage_note,
         'Low' AS confidence
     FROM #resolved AS resolved
     ORDER BY process_name, step_order, called_schema, called_object_name;

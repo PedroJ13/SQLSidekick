@@ -183,7 +183,7 @@ const LINEAGE_MAP_CONFIG = {
     label: "Job",
     defaultName: "",
     emptyTitle: "No jobs detected.",
-    emptyDescription: "Check SQL Agent credentials in Settings or confirm SQL Agent metadata is available.",
+    emptyDescription: "Check SQL Agent credentials in Settings or confirm job metadata is available.",
   },
   procedure_lineage_map: {
     mapType: "procedures",
@@ -227,7 +227,6 @@ const GROUP_CATEGORY_SLUGS = {
   "SQL Code": "code",
   "DB Users / Roles": "security",
   "SQL Agent Jobs": "jobs",
-  "Process Documentation": "processes",
   Jobs: "processes",
   Analysis: "analysis",
   Operations: "operations",
@@ -991,8 +990,8 @@ async function runActiveQuery() {
       state.columns = [];
       state.rows = [];
       renderResults();
-      renderEmptyTable("Configure SQL Agent / msdb credentials in Settings to run this lineage section.");
-      showMessage(els.message, "This lineage section needs the dedicated SQL Agent / msdb login configured in Settings.", "error");
+      renderEmptyTable("Configure SQL Agent credentials in Settings to run this lineage section.");
+      showMessage(els.message, "This lineage section needs the dedicated SQL Agent login configured in Settings.", "error");
       return;
     }
     const useAgentMetadata = shouldUseAgentMetadataQuery() && shouldUseAgentConnection();
@@ -1013,8 +1012,8 @@ async function runActiveQuery() {
     updateTableFilterUI();
     if (isMixedLineage && state.rows.length === 0) {
       renderResults();
-      renderEmptyTable("No process lineage rows found. Check SQL Agent credentials and job step visibility.");
-      showMessage(els.message, "No lineage rows were found from SQL Agent jobs. Verify the special msdb login can read job steps.", "error");
+      renderEmptyTable("No lineage rows found. Check SQL Agent credentials and job step visibility.");
+      showMessage(els.message, "No lineage rows were returned. Verify the SQL Agent login can read job steps.", "error");
     } else {
       renderResults();
       clearMessage(els.message);
@@ -1555,7 +1554,7 @@ function renderProcessMapStep(step) {
             ? step.objects.map((object) => renderProcessMapObject(object, step)).join("")
             : renderMapEmptyState(
                 "No SQL objects detected.",
-                "This step may not be T-SQL, may use dynamic command text, or the current login may not see the object metadata."
+                "This step may not be T-SQL, may use dynamic SQL, or the current login may not see object metadata."
               )
         }
       </div>
@@ -1581,7 +1580,7 @@ function renderProcessMapObject(object, step) {
     fragmentTitle: "Job command fragments",
   });
   const objectWarnings = renderLineageNotes([
-    object.hasDynamicSql ? "Dynamic SQL indicators detected; lineage may be incomplete." : "",
+    object.hasDynamicSql ? "Dynamic SQL detected; lineage may be incomplete." : "",
     ...(object.lineageNotes || []),
   ]);
   return `
@@ -1601,8 +1600,8 @@ function renderProcessMapObject(object, step) {
           object.tables.length > 0
             ? object.tables.map((table) => renderProcessMapTable(table, object, step)).join("")
             : renderMapEmptyState(
-                "No referenced tables found by SQL Server catalog.",
-                "Dynamic SQL, temp tables, cross-database references, encrypted modules, or metadata permissions can hide dependencies."
+                "No referenced tables found in catalog metadata.",
+                "Dynamic SQL, temp tables, cross-database references, encrypted modules, or permissions can hide dependencies."
               )
         }
       </div>
