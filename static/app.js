@@ -35,7 +35,7 @@ const DOCUMENTATION_GROUPS = [
   },
   {
     title: "Jobs",
-    names: ["process_inventory", "process_steps", "process_recent_runs"],
+    names: ["sql_agent_jobs", "sql_agent_job_steps", "sql_agent_job_schedules", "sql_agent_job_history"],
   },
   { title: "Analysis", names: ["review_findings", "index_usage", "index_physical_stats", "missing_indexes", "statistics"] },
 ];
@@ -177,13 +177,11 @@ const AUTO_ALERTS_KEY = "sqlsidekick.autoAlerts";
 const AGENT_CONNECTION_KEY = "sqlsidekick.agentConnection";
 const PROCESS_MAP_SELECTIONS_KEY = "sqlsidekick.processMapSelections";
 const TABLE_PAGE_SIZE = 50;
-const DEFAULT_PROCESS_MAP_NAME = "TeamRecalculationMWRLife";
-const DEFAULT_PROCESS_MAP_NAMES = ["TeamRecalculationMWRLife", "DailyResidualNew_DualTeam"];
 const LINEAGE_MAP_CONFIG = {
   job_lineage_map: {
     mapType: "jobs",
     label: "Job",
-    defaultName: DEFAULT_PROCESS_MAP_NAME,
+    defaultName: "",
     emptyTitle: "No jobs detected.",
     emptyDescription: "Check SQL Agent credentials in Settings or confirm SQL Agent metadata is available.",
   },
@@ -209,6 +207,16 @@ const LINEAGE_MAP_CONFIG = {
     emptyDescription: "The selected database did not return functions for this map.",
   },
 };
+const AGENT_METADATA_QUERIES = new Set([
+  "sql_agent_jobs",
+  "sql_agent_job_steps",
+  "sql_agent_job_schedules",
+  "sql_agent_job_history",
+  "process_inventory",
+  "process_steps",
+  "process_sql_objects",
+  "process_recent_runs",
+]);
 
 const GROUP_CATEGORY_SLUGS = {
   Server: "server",
@@ -254,8 +262,8 @@ const state = {
     columns: [],
     error: "",
   },
-  processMapName: DEFAULT_PROCESS_MAP_NAME,
-  processMapNames: [...DEFAULT_PROCESS_MAP_NAMES],
+  processMapName: "",
+  processMapNames: [],
   processMapType: "jobs",
   processMapLabel: "Job",
   processMapNameByType: loadProcessMapSelections(),
@@ -485,6 +493,10 @@ function getQueryConnection(useAgent = false) {
 
 function shouldUseMixedLineageQuery() {
   return ["process_lineage", "used_by_jobs"].includes(state.activeQuery?.name);
+}
+
+function shouldUseAgentMetadataQuery() {
+  return AGENT_METADATA_QUERIES.has(state.activeQuery?.name);
 }
 
 function shouldUseAgentConnection() {
@@ -983,10 +995,11 @@ async function runActiveQuery() {
       showMessage(els.message, "This lineage section needs the dedicated SQL Agent / msdb login configured in Settings.", "error");
       return;
     }
+    const useAgentMetadata = shouldUseAgentMetadataQuery() && shouldUseAgentConnection();
     const payload = await api(isMixedLineage ? "/api/run-lineage-query" : "/api/run-query", {
       method: "POST",
       body: JSON.stringify({
-        connection: getQueryConnection(),
+        connection: useAgentMetadata ? getQueryConnection(true) : getQueryConnection(),
         agentConnection: shouldUseAgentConnection() ? getQueryConnection(true) : null,
         queryName: state.activeQuery.name,
         scriptVersion: state.scriptVersion,
@@ -1147,6 +1160,8 @@ function renderProcessLineageMap(processName, rows, processObjects, tableFeature
           <span><strong>${impact.tableCount}</strong> tables</span>
           <span><strong>${impact.triggerCount}</strong> triggers</span>
           <span><strong>${impact.computedColumnCount}</strong> computed</span>
+          <span class="${impact.dynamicSqlCount ? "stat-warning" : ""}"><strong>${impact.dynamicSqlCount}</strong> dynamic</span>
+          <span class="${impact.unresolvedCount ? "stat-warning" : ""}"><strong>${impact.unresolvedCount}</strong> unresolved</span>
           <span class="${impact.partialDependencyCount ? "stat-warning" : ""}"><strong>${impact.partialDependencyCount}</strong> partial</span>
         </div>
       </div>
@@ -1176,6 +1191,8 @@ function renderProcessLineageMap(processName, rows, processObjects, tableFeature
               <span><strong>High</strong> catalog dependency resolved</span>
               <span><strong>Medium</strong> object found, dependency partial</span>
               <span><strong>Low</strong> parsed from job text only</span>
+              <span><strong>Dynamic</strong> SQL text may hide objects</span>
+              <span><strong>Unresolved</strong> object not found or metadata hidden</span>
             </div>
           </div>
           <button type="button" class="map-toggle-button" data-map-action="expand" title="Expand all" aria-label="Expand all">+</button>
@@ -1262,11 +1279,23 @@ function buildProcessLineageGraph(tree, config) {
     addLink(rootId, stepId);
     step.objects.forEach((object) => {
       const objectId = `object:${step.stepOrder}:${object.schemaName}.${object.objectName}`;
-      addNode(objectId, `${object.schemaName}.${object.objectName}`, "object", 2);
+      addNode(
+        objectId,
+        `${object.schemaName}.${object.objectName}`,
+        object.isResolved === false || object.resolutionStatus === "Unresolved object" ? "unresolved" : "object",
+        2
+      );
       addLink(stepId, objectId);
+      if (object.hasDynamicSql || object.lineageNotes?.length) {
+        const warningId = `warning:${step.stepOrder}:${object.schemaName}.${object.objectName}`;
+        const warningLabel = object.hasDynamicSql ? "Dynamic SQL / partial lineage" : "Lineage warning";
+        addNode(warningId, warningLabel, "warning", 3);
+        addLink(objectId, warningId);
+      }
       object.tables.forEach((table) => {
         const tableId = `table:${table.schemaName}.${table.objectName}`;
-        addNode(tableId, `${table.schemaName}.${table.objectName}`, "table", 3);
+        const tableKind = String(table.confidence || "").toLowerCase() === "high" ? "table" : "partial-table";
+        addNode(tableId, `${table.schemaName}.${table.objectName}`, tableKind, 3);
         addLink(objectId, tableId);
         table.features?.forEach((feature) => {
           const featureId = `feature:${table.schemaName}.${table.objectName}:${feature.kind}:${feature.schemaName}.${feature.objectName}`;
@@ -1356,14 +1385,23 @@ function buildProcessLineageTree(processName, rows, processObjects, tableFeature
         objectName,
         objectType: raw.object_type || raw.called_object_type || "SQL object",
         confidence: raw.confidence || "",
+        resolutionStatus: raw.resolution_status || "",
+        isResolved: normalizeSqlBoolean(raw.is_resolved, raw.resolution_status !== "Unresolved object"),
+        hasDynamicSql: normalizeSqlBoolean(raw.has_dynamic_sql, false),
+        lineageNotes: uniqueValues([raw.lineage_note]),
         calledDefinition: raw.called_definition || "",
         commandFragments: uniqueFragments([raw.command_preview]),
         tables: new Map(),
       });
-    } else if (raw.command_preview || raw.called_definition) {
+    } else if (raw.command_preview || raw.called_definition || raw.lineage_note || raw.resolution_status || raw.has_dynamic_sql !== undefined) {
       const existing = step.objects.get(objectKey);
       existing.commandFragments = uniqueFragments([...(existing.commandFragments || []), raw.command_preview]);
       existing.calledDefinition = existing.calledDefinition || raw.called_definition || "";
+      existing.confidence = strongestConfidence(existing.confidence, raw.confidence);
+      existing.resolutionStatus = existing.resolutionStatus || raw.resolution_status || "";
+      existing.isResolved = existing.isResolved && normalizeSqlBoolean(raw.is_resolved, existing.isResolved);
+      existing.hasDynamicSql = existing.hasDynamicSql || normalizeSqlBoolean(raw.has_dynamic_sql, false);
+      existing.lineageNotes = uniqueValues([...(existing.lineageNotes || []), raw.lineage_note]);
     }
     return step.objects.get(objectKey);
   };
@@ -1383,6 +1421,7 @@ function buildProcessLineageTree(processName, rows, processObjects, tableFeature
       objectName: referencedObject,
       type: row.referenced_type || "USER_TABLE",
       confidence: row.confidence || object.confidence || "",
+      lineageNotes: uniqueValues([row.lineage_note]),
       features: featuresByTable.get(tableKey.toLowerCase()) || [],
       commandFragments: uniqueFragments([
         ...((object.tables.get(tableKey)?.commandFragments) || []),
@@ -1415,9 +1454,14 @@ function summarizeProcessMapImpact(tree) {
   const triggers = new Set();
   const computedColumns = new Set();
   const partialDependencies = new Set();
+  const dynamicSql = new Set();
+  const unresolved = new Set();
   tree.steps.forEach((step) => {
     step.objects.forEach((object) => {
-      objects.add(`${object.schemaName}.${object.objectName}`.toLowerCase());
+      const objectKey = `${object.schemaName}.${object.objectName}`.toLowerCase();
+      objects.add(objectKey);
+      if (object.hasDynamicSql) dynamicSql.add(objectKey);
+      if (object.isResolved === false || object.resolutionStatus === "Unresolved object") unresolved.add(objectKey);
       if (String(object.confidence || "").toLowerCase() !== "high") {
         partialDependencies.add(`object:${step.stepOrder}:${object.schemaName}.${object.objectName}`.toLowerCase());
       }
@@ -1443,6 +1487,8 @@ function summarizeProcessMapImpact(tree) {
     tableCount: tables.size,
     triggerCount: triggers.size,
     computedColumnCount: computedColumns.size,
+    dynamicSqlCount: dynamicSql.size,
+    unresolvedCount: unresolved.size,
     partialDependencyCount: partialDependencies.size,
   };
 }
@@ -1528,9 +1574,16 @@ function renderProcessMapObject(object, step) {
     stepOrder: step.stepOrder,
     stepName: step.stepName,
     dbName: step.dbName,
+    resolutionStatus: object.resolutionStatus,
+    hasDynamicSql: object.hasDynamicSql,
+    lineageNotes: object.lineageNotes || [],
     commandFragments: object.commandFragments || [],
     fragmentTitle: "Job command fragments",
   });
+  const objectWarnings = renderLineageNotes([
+    object.hasDynamicSql ? "Dynamic SQL indicators detected; lineage may be incomplete." : "",
+    ...(object.lineageNotes || []),
+  ]);
   return `
     <details class="process-object-node" open>
       <summary>
@@ -1539,8 +1592,10 @@ function renderProcessMapObject(object, step) {
         <strong>${escapeHtml(object.schemaName)}.${escapeHtml(object.objectName)}</strong>
         <span class="node-muted">${escapeHtml(objectType.label)}</span>
         ${object.confidence ? `<span class="confidence-pill" title="${escapeHtml(confidenceDescription(object.confidence))}">Confidence: ${escapeHtml(object.confidence)}</span>` : ""}
+        ${object.resolutionStatus ? `<span class="lineage-status-pill ${object.isResolved === false ? "lineage-status-warn" : ""}">${escapeHtml(object.resolutionStatus)}</span>` : ""}
         <button type="button" class="map-detail-button" data-detail-key="${escapeHtml(detailKey)}" title="Show detail" aria-label="Show detail">i</button>
       </summary>
+      ${objectWarnings}
       <div class="referenced-table-list">
         ${
           object.tables.length > 0
@@ -1568,9 +1623,11 @@ function renderProcessMapTable(table, object, step) {
     dbName: step.dbName,
     parentObject: `${object.schemaName}.${object.objectName}`,
     usedBy: table.usedBy || [],
+    lineageNotes: table.lineageNotes || [],
     commandFragments: table.commandFragments || object.commandFragments || [],
     fragmentTitle: "Procedure code fragments",
   });
+  const tableWarnings = renderLineageNotes(table.lineageNotes || []);
   return `
     <details class="table-node-shell" open>
       <summary class="table-node">
@@ -1581,6 +1638,7 @@ function renderProcessMapTable(table, object, step) {
         ${table.confidence ? `<span class="confidence-pill" title="${escapeHtml(confidenceDescription(table.confidence))}">Confidence: ${escapeHtml(table.confidence)}</span>` : ""}
         <button type="button" class="map-detail-button" data-detail-key="${escapeHtml(detailKey)}" title="Show detail" aria-label="Show detail">i</button>
       </summary>
+      ${tableWarnings}
       ${
         table.features?.length
           ? `<div class="table-feature-list">${table.features.map((feature) => renderTableFeature(feature, table, object, step)).join("")}</div>`
@@ -1758,10 +1816,13 @@ function renderProcessMapDetail(detailKey) {
       <div><strong>DB</strong><span>${escapeHtml(detail.dbName || "-")}</span></div>
       ${detail.parentObject ? `<div><strong>${escapeHtml(detail.parentLabel || "Called Object")}</strong><span>${escapeHtml(detail.parentObject)}</span></div>` : ""}
       ${detail.calledObject ? `<div><strong>SQL Object</strong><span>${escapeHtml(detail.calledObject)}</span></div>` : ""}
+      ${detail.resolutionStatus ? `<div><strong>Resolution</strong><span>${escapeHtml(detail.resolutionStatus)}</span></div>` : ""}
+      ${detail.hasDynamicSql ? `<div><strong>Dynamic SQL</strong><span>Detected</span></div>` : ""}
       ${detail.status ? `<div><strong>Status</strong><span>${escapeHtml(detail.status)}</span></div>` : ""}
       ${detail.events ? `<div><strong>Events</strong><span>${escapeHtml(detail.events)}</span></div>` : ""}
       ${detail.referencedColumns ? `<div><strong>Columns</strong><span>${escapeHtml(detail.referencedColumns)}</span></div>` : ""}
     </div>
+    ${renderLineageNotes(detail.lineageNotes || [])}
     <div class="map-fragments">
       <strong>${escapeHtml(detail.fragmentTitle || "Command fragments")}</strong>
       ${
@@ -1802,6 +1863,29 @@ function formatStepLabel(detail) {
 
 function uniqueValues(values) {
   return Array.from(new Set((values || []).filter((value) => value !== null && value !== undefined && value !== "")));
+}
+
+function normalizeSqlBoolean(value, fallback = false) {
+  if (value === true || value === 1 || value === "1") return true;
+  if (value === false || value === 0 || value === "0") return false;
+  return fallback;
+}
+
+function strongestConfidence(current, next) {
+  const rank = { low: 1, medium: 2, high: 3 };
+  const currentRank = rank[String(current || "").toLowerCase()] || 0;
+  const nextRank = rank[String(next || "").toLowerCase()] || 0;
+  return nextRank > currentRank ? next : current;
+}
+
+function renderLineageNotes(notes) {
+  const values = uniqueValues(notes);
+  if (!values.length) return "";
+  return `
+    <div class="lineage-note-list">
+      ${values.map((note) => `<span>${escapeHtml(note)}</span>`).join("")}
+    </div>
+  `;
 }
 
 function truncateMiddle(value, maxLength) {
@@ -2109,7 +2193,7 @@ function getDefaultFilterColumn() {
     linked_servers: ["linked_server_name", "name"],
     server_configurations: ["configuration_name", "name"],
     server_services: ["service_name", "servicename"],
-    sql_agent_jobs: ["job_name"],
+    sql_agent_jobs: ["job_name", "name"],
     sql_agent_job_steps: ["job_name", "step_name"],
     sql_agent_job_schedules: ["job_name", "schedule_name"],
     sql_agent_job_history: ["job_name"],
@@ -2274,7 +2358,8 @@ async function openProcessDetail(row) {
     const detail = {
       overview: primaryPayload.resultSets?.[0] || { columns: [], rows: [] },
       steps: stepsResultSet,
-      recentRuns: primaryPayload.resultSets?.[2] || { columns: [], rows: [] },
+      sqlObjects: primaryPayload.resultSets?.[2] || { columns: [], rows: [] },
+      recentRuns: primaryPayload.resultSets?.[3] || { columns: [], rows: [] },
       processName,
       jobId: row.job_id || "",
     };

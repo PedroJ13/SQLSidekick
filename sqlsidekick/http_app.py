@@ -11,6 +11,18 @@ from sqlsidekick.query_loader import load_named_queries, normalize_version
 from sqlsidekick.sql_server import ConnectionSettings, SQLServerError, execute_query, test_connection
 
 
+AGENT_METADATA_QUERY_NAMES = {
+    "sql_agent_jobs",
+    "sql_agent_job_steps",
+    "sql_agent_job_schedules",
+    "sql_agent_job_history",
+    "process_inventory",
+    "process_steps",
+    "process_sql_objects",
+    "process_recent_runs",
+}
+
+
 class SQLSidekickHandler(BaseHTTPRequestHandler):
     root: Path
     queries_path: Path
@@ -108,10 +120,18 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Consulta no encontrada."}, status=404)
             return
 
-        def action(settings: ConnectionSettings) -> dict[str, Any]:
-            return execute_query(settings, queries[name].sql)
-
-        self.handle_sql_action(action, payload=payload)
+        try:
+            connection_payload = payload.get("connection", payload)
+            agent_payload = payload.get("agentConnection")
+            if name in AGENT_METADATA_QUERY_NAMES and agent_payload:
+                connection_payload = agent_payload
+            settings = ConnectionSettings.from_payload(connection_payload)
+            result = execute_query(settings, queries[name].sql)
+            self.send_json({"ok": True, **result})
+        except SQLServerError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": f"Error inesperado: {exc}"}, status=500)
 
     def handle_run_lineage_query(self) -> None:
         payload = self.read_json()
@@ -142,7 +162,7 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
 
     def handle_process_lineage_map(self) -> None:
         payload = self.read_json()
-        process_name = str(payload.get("processName", "TeamRecalculationMWRLife")).strip() or "TeamRecalculationMWRLife"
+        process_name = str(payload.get("processName", "")).strip()
         map_type = str(payload.get("mapType", "jobs")).strip().lower() or "jobs"
         try:
             primary_settings = ConnectionSettings.from_payload(payload.get("connection", payload))
@@ -518,6 +538,9 @@ def lineage_from_process_objects_sql(query_name: str, rows: list[dict[str, Any]]
                 "database_name": row.get("database_name"),
                 "called_schema": row.get("schema_name") or "dbo",
                 "called_object_name": object_name,
+                "called_object_type": row.get("object_type") or row.get("called_object_type"),
+                "detection_method": row.get("detection_method"),
+                "source_confidence": row.get("confidence"),
                 "command_preview": row.get("command_preview"),
             }
         )
@@ -535,6 +558,7 @@ SELECT
     CAST(NULL AS sysname) AS database_name,
     CAST(NULL AS sysname) AS called_schema,
     CAST(NULL AS sysname) AS called_object_name,
+    CAST(NULL AS nvarchar(60)) AS called_object_type,
     CAST(NULL AS varchar(10)) AS confidence
 WHERE 1 = 0;
 """
@@ -546,9 +570,14 @@ SELECT
     CAST(NULL AS sysname) AS database_name,
     CAST(NULL AS sysname) AS called_schema,
     CAST(NULL AS sysname) AS called_object_name,
+    CAST(NULL AS nvarchar(60)) AS called_object_type,
     CAST(NULL AS sysname) AS referenced_schema,
     CAST(NULL AS sysname) AS referenced_object,
     CAST(NULL AS nvarchar(60)) AS referenced_type,
+    CAST(NULL AS nvarchar(80)) AS resolution_status,
+    CAST(NULL AS bit) AS is_resolved,
+    CAST(NULL AS bit) AS has_dynamic_sql,
+    CAST(NULL AS nvarchar(4000)) AS lineage_note,
     CAST(NULL AS varchar(10)) AS confidence
 WHERE 1 = 0;
 """
@@ -564,6 +593,9 @@ DECLARE @called TABLE (
     database_name sysname NULL,
     called_schema sysname NULL,
     called_object_name sysname NULL,
+    called_object_type nvarchar(60) NULL,
+    detection_method nvarchar(120) NULL,
+    source_confidence varchar(10) NULL,
     command_preview nvarchar(500) NULL
 );
 
@@ -575,6 +607,9 @@ INSERT INTO @called (
     database_name,
     called_schema,
     called_object_name,
+    called_object_type,
+    detection_method,
+    source_confidence,
     command_preview
 )
 SELECT
@@ -585,6 +620,9 @@ SELECT
     database_name,
     called_schema,
     called_object_name,
+    called_object_type,
+    detection_method,
+    source_confidence,
     command_preview
 FROM OPENJSON(@lineage_json)
 WITH (
@@ -595,87 +633,183 @@ WITH (
     database_name sysname '$.database_name',
     called_schema sysname '$.called_schema',
     called_object_name sysname '$.called_object_name',
+    called_object_type nvarchar(60) '$.called_object_type',
+    detection_method nvarchar(120) '$.detection_method',
+    source_confidence varchar(10) '$.source_confidence',
     command_preview nvarchar(500) '$.command_preview'
 );
 
-WITH resolved AS (
-    SELECT
-        c.process_name,
-        c.job_id,
-        c.step_order,
-        c.step_name,
-        c.database_name,
-        COALESCE(c.called_schema, 'dbo') AS called_schema,
-        c.called_object_name,
-        o.object_id AS called_object_id,
-        c.command_preview,
-        sm.definition AS called_definition
-    FROM @called AS c
-    LEFT JOIN sys.schemas AS s
-        ON s.name = COALESCE(c.called_schema, 'dbo')
-    LEFT JOIN sys.objects AS o
-        ON o.schema_id = s.schema_id
-       AND o.name = c.called_object_name
-    LEFT JOIN sys.sql_modules AS sm
-        ON sm.object_id = o.object_id
-)
+SELECT
+    c.process_name,
+    c.job_id,
+    c.step_order,
+    c.step_name,
+    c.database_name,
+    COALESCE(c.called_schema, 'dbo') AS called_schema,
+    c.called_object_name,
+    COALESCE(
+        CONVERT(nvarchar(60), o.type_desc) COLLATE DATABASE_DEFAULT,
+        c.called_object_type COLLATE DATABASE_DEFAULT,
+        N'Unresolved SQL object' COLLATE DATABASE_DEFAULT
+    ) AS called_object_type,
+    o.object_id AS called_object_id,
+    c.detection_method,
+    c.source_confidence,
+    c.command_preview,
+    sm.definition AS called_definition,
+    CASE
+        WHEN o.object_id IS NULL THEN CAST(0 AS bit)
+        ELSE CAST(1 AS bit)
+    END AS is_resolved,
+    CASE
+        WHEN o.object_id IS NULL THEN N'Unresolved object'
+        WHEN sm.definition IS NULL AND o.type IN ('P', 'V', 'TR', 'FN', 'IF', 'TF') THEN N'Definition not visible'
+        ELSE N'Resolved'
+    END AS resolution_status,
+    CASE
+        WHEN LOWER((COALESCE(c.command_preview, N'') COLLATE DATABASE_DEFAULT) + N' ' + (COALESCE(sm.definition, N'') COLLATE DATABASE_DEFAULT)) LIKE N'%sp_executesql%'
+          OR LOWER((COALESCE(c.command_preview, N'') COLLATE DATABASE_DEFAULT) + N' ' + (COALESCE(sm.definition, N'') COLLATE DATABASE_DEFAULT)) LIKE N'%exec(@%'
+          OR LOWER((COALESCE(c.command_preview, N'') COLLATE DATABASE_DEFAULT) + N' ' + (COALESCE(sm.definition, N'') COLLATE DATABASE_DEFAULT)) LIKE N'%execute(@%'
+          OR LOWER((COALESCE(c.command_preview, N'') COLLATE DATABASE_DEFAULT) + N' ' + (COALESCE(sm.definition, N'') COLLATE DATABASE_DEFAULT)) LIKE N'%exec (@%'
+          OR LOWER((COALESCE(c.command_preview, N'') COLLATE DATABASE_DEFAULT) + N' ' + (COALESCE(sm.definition, N'') COLLATE DATABASE_DEFAULT)) LIKE N'%execute (@%'
+          OR LOWER((COALESCE(c.command_preview, N'') COLLATE DATABASE_DEFAULT) + N' ' + (COALESCE(sm.definition, N'') COLLATE DATABASE_DEFAULT)) LIKE N'%+ @%'
+        THEN CAST(1 AS bit)
+        ELSE CAST(0 AS bit)
+    END AS has_dynamic_sql
+INTO #resolved
+FROM @called AS c
+LEFT JOIN sys.schemas AS s
+    ON s.name = COALESCE(c.called_schema, 'dbo')
+LEFT JOIN sys.objects AS o
+    ON o.schema_id = s.schema_id
+   AND o.name = c.called_object_name
+LEFT JOIN sys.sql_modules AS sm
+    ON sm.object_id = o.object_id;
 """
     if query_name == "used_by_jobs":
         return common + """
-SELECT
-    COALESCE(target_schema.name, sed.referenced_schema_name) AS referenced_schema,
-    COALESCE(target_object.name, sed.referenced_entity_name) AS referenced_object,
-    target_object.type_desc AS referenced_type,
-    resolved.process_name,
-    resolved.step_order,
-    resolved.step_name,
-    resolved.database_name,
-    resolved.called_schema,
-    resolved.called_object_name,
-    resolved.command_preview,
-    resolved.called_definition,
-    CASE
-        WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NOT NULL THEN 'High'
-        WHEN resolved.called_object_id IS NOT NULL THEN 'Medium'
-        ELSE 'Low'
-    END AS confidence
-FROM resolved
-LEFT JOIN sys.sql_expression_dependencies AS sed
-    ON sed.referencing_id = resolved.called_object_id
-LEFT JOIN sys.objects AS target_object
-    ON target_object.object_id = sed.referenced_id
-LEFT JOIN sys.schemas AS target_schema
-    ON target_schema.schema_id = target_object.schema_id
-WHERE COALESCE(target_object.name, sed.referenced_entity_name) IS NOT NULL
-ORDER BY referenced_schema, referenced_object, process_name, step_order;
+BEGIN TRY
+    SELECT
+        COALESCE(target_schema.name, sed.referenced_schema_name) AS referenced_schema,
+        COALESCE(target_object.name, sed.referenced_entity_name) AS referenced_object,
+        target_object.type_desc AS referenced_type,
+        resolved.process_name,
+        resolved.step_order,
+        resolved.step_name,
+        resolved.database_name,
+        resolved.called_schema,
+        resolved.called_object_name,
+        resolved.called_object_type,
+        resolved.command_preview,
+        resolved.called_definition,
+        resolved.resolution_status,
+        resolved.is_resolved,
+        resolved.has_dynamic_sql,
+        CASE
+            WHEN resolved.called_object_id IS NULL THEN N'Called object was parsed from command text but was not resolved in this database.'
+            WHEN resolved.called_definition IS NULL THEN N'Object exists, but definition is not visible or is encrypted; catalog dependency coverage may be partial.'
+            WHEN resolved.has_dynamic_sql = 1 THEN N'Dynamic SQL indicators detected; referenced objects may be incomplete.'
+            ELSE NULL
+        END AS lineage_note,
+        CASE
+            WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NOT NULL THEN 'High'
+            WHEN resolved.called_object_id IS NOT NULL AND resolved.called_definition IS NOT NULL THEN 'Medium'
+            ELSE 'Low'
+        END AS confidence
+    FROM #resolved AS resolved
+    LEFT JOIN sys.sql_expression_dependencies AS sed
+        ON sed.referencing_id = resolved.called_object_id
+    LEFT JOIN sys.objects AS target_object
+        ON target_object.object_id = sed.referenced_id
+    LEFT JOIN sys.schemas AS target_schema
+        ON target_schema.schema_id = target_object.schema_id
+    WHERE COALESCE(target_object.name, sed.referenced_entity_name) IS NOT NULL
+    ORDER BY referenced_schema, referenced_object, process_name, step_order;
+END TRY
+BEGIN CATCH
+    SELECT
+        CAST(NULL AS sysname) AS referenced_schema,
+        CAST(NULL AS sysname) AS referenced_object,
+        CAST(NULL AS nvarchar(60)) AS referenced_type,
+        process_name,
+        step_order,
+        step_name,
+        database_name,
+        called_schema,
+        called_object_name,
+        called_object_type,
+        command_preview,
+        called_definition,
+        N'Dependency metadata not visible' AS resolution_status,
+        is_resolved,
+        has_dynamic_sql,
+        CONCAT(N'Could not read SQL dependency metadata: ', ERROR_MESSAGE()) AS lineage_note,
+        'Low' AS confidence
+    FROM #resolved AS resolved;
+END CATCH;
 """
 
     return common + """
-SELECT
-    resolved.process_name,
-    resolved.step_order,
-    resolved.step_name,
-    resolved.database_name,
-    resolved.called_schema,
-    resolved.called_object_name,
-    resolved.command_preview,
-    resolved.called_definition,
-    COALESCE(target_schema.name, sed.referenced_schema_name) AS referenced_schema,
-    COALESCE(target_object.name, sed.referenced_entity_name) AS referenced_object,
-    target_object.type_desc AS referenced_type,
-    CASE
-        WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NOT NULL THEN 'High'
-        WHEN resolved.called_object_id IS NOT NULL THEN 'Medium'
-        ELSE 'Low'
-    END AS confidence
-FROM resolved
-LEFT JOIN sys.sql_expression_dependencies AS sed
-    ON sed.referencing_id = resolved.called_object_id
-LEFT JOIN sys.objects AS target_object
-    ON target_object.object_id = sed.referenced_id
-LEFT JOIN sys.schemas AS target_schema
-    ON target_schema.schema_id = target_object.schema_id
-ORDER BY process_name, step_order, referenced_schema, referenced_object;
+BEGIN TRY
+    SELECT
+        resolved.process_name,
+        resolved.step_order,
+        resolved.step_name,
+        resolved.database_name,
+        resolved.called_schema,
+        resolved.called_object_name,
+        resolved.called_object_type,
+        resolved.command_preview,
+        resolved.called_definition,
+        COALESCE(target_schema.name, sed.referenced_schema_name) AS referenced_schema,
+        COALESCE(target_object.name, sed.referenced_entity_name) AS referenced_object,
+        target_object.type_desc AS referenced_type,
+        resolved.resolution_status,
+        resolved.is_resolved,
+        resolved.has_dynamic_sql,
+        CASE
+            WHEN resolved.called_object_id IS NULL THEN N'Called object was parsed from command text but was not resolved in this database.'
+            WHEN resolved.called_definition IS NULL THEN N'Object exists, but definition is not visible or is encrypted; catalog dependency coverage may be partial.'
+            WHEN resolved.has_dynamic_sql = 1 THEN N'Dynamic SQL indicators detected; referenced objects may be incomplete.'
+            WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NULL THEN N'No catalog dependencies returned; temp tables, permissions, or dynamic SQL may hide references.'
+            ELSE NULL
+        END AS lineage_note,
+        CASE
+            WHEN resolved.called_object_id IS NOT NULL AND sed.referenced_id IS NOT NULL THEN 'High'
+            WHEN resolved.called_object_id IS NOT NULL AND resolved.called_definition IS NOT NULL THEN 'Medium'
+            ELSE 'Low'
+        END AS confidence
+    FROM #resolved AS resolved
+    LEFT JOIN sys.sql_expression_dependencies AS sed
+        ON sed.referencing_id = resolved.called_object_id
+    LEFT JOIN sys.objects AS target_object
+        ON target_object.object_id = sed.referenced_id
+    LEFT JOIN sys.schemas AS target_schema
+        ON target_schema.schema_id = target_object.schema_id
+    ORDER BY process_name, step_order, referenced_schema, referenced_object;
+END TRY
+BEGIN CATCH
+    SELECT
+        process_name,
+        step_order,
+        step_name,
+        database_name,
+        called_schema,
+        called_object_name,
+        called_object_type,
+        command_preview,
+        called_definition,
+        CAST(NULL AS sysname) AS referenced_schema,
+        CAST(NULL AS sysname) AS referenced_object,
+        CAST(NULL AS nvarchar(60)) AS referenced_type,
+        N'Dependency metadata not visible' AS resolution_status,
+        is_resolved,
+        has_dynamic_sql,
+        CONCAT(N'Could not read SQL dependency metadata: ', ERROR_MESSAGE()) AS lineage_note,
+        'Low' AS confidence
+    FROM #resolved AS resolved
+    ORDER BY process_name, step_order, called_schema, called_object_name;
+END CATCH;
 """
 
 
@@ -1339,6 +1473,68 @@ BEGIN TRY
         FROM #step_raw
         ORDER BY step_id;
     END;
+
+    IF @steps_error IS NOT NULL
+    BEGIN
+        SELECT
+            @process_name AS process_name,
+            CAST(NULL AS int) AS step_order,
+            CAST(NULL AS sysname) AS step_name,
+            CAST(NULL AS sysname) AS database_name,
+            CAST(NULL AS varchar(20)) AS object_type,
+            CAST(NULL AS sysname) AS schema_name,
+            CAST(NULL AS sysname) AS object_name,
+            @steps_error AS detection_method,
+            CAST(NULL AS varchar(10)) AS confidence,
+            CAST(NULL AS nvarchar(500)) AS command_preview;
+    END
+    ELSE
+    BEGIN
+        WITH step_commands AS (
+            SELECT
+                step_id,
+                step_name,
+                database_name,
+                command,
+                CASE
+                    WHEN PATINDEX('%execute %', LOWER(command)) > 0 THEN PATINDEX('%execute %', LOWER(command)) + 8
+                    WHEN PATINDEX('%exec %', LOWER(command)) > 0 THEN PATINDEX('%exec %', LOWER(command)) + 5
+                    ELSE 0
+                END AS object_start
+            FROM #step_raw
+            WHERE subsystem = 'TSQL'
+        ),
+        detected AS (
+            SELECT
+                step_id,
+                step_name,
+                database_name,
+                LTRIM(RTRIM(
+                    REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                        LEFT(SUBSTRING(command, object_start, 4000), CHARINDEX(' ', SUBSTRING(command, object_start, 4000) + ' ') - 1),
+                        '[', ''), ']', ''), ';', ''), CHAR(9), ''), CHAR(10), '')
+                )) AS detected_object,
+                LEFT(REPLACE(REPLACE(command, CHAR(13), ' '), CHAR(10), ' '), 500) AS command_preview
+            FROM step_commands
+            WHERE object_start > 0
+        )
+        SELECT
+            @process_name AS process_name,
+            step_id AS step_order,
+            step_name,
+            database_name,
+            'Procedure' AS object_type,
+            COALESCE(PARSENAME(detected_object, 2), 'dbo') AS schema_name,
+            PARSENAME(detected_object, 1) AS object_name,
+            'Process detail EXEC keyword' AS detection_method,
+            CASE WHEN PARSENAME(detected_object, 2) IS NOT NULL THEN 'High' ELSE 'Medium' END AS confidence,
+            command_preview
+        FROM detected
+        WHERE detected_object IS NOT NULL
+          AND detected_object <> ''
+          AND detected_object NOT LIKE '@%'
+        ORDER BY step_id, detected_object;
+    END;
 END TRY
 BEGIN CATCH
     SELECT
@@ -1352,6 +1548,18 @@ BEGIN CATCH
         CAST(NULL AS int) AS retry_attempts,
         CAST(NULL AS int) AS retry_interval,
         CAST(NULL AS int) AS command_length,
+        CAST(NULL AS nvarchar(500)) AS command_preview;
+
+    SELECT
+        @process_name AS process_name,
+        CAST(NULL AS int) AS step_order,
+        CAST(NULL AS sysname) AS step_name,
+        CAST(NULL AS sysname) AS database_name,
+        CAST(NULL AS varchar(20)) AS object_type,
+        CAST(NULL AS sysname) AS schema_name,
+        CAST(NULL AS sysname) AS object_name,
+        ERROR_MESSAGE() AS detection_method,
+        CAST(NULL AS varchar(10)) AS confidence,
         CAST(NULL AS nvarchar(500)) AS command_preview;
 END CATCH;
 
