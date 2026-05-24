@@ -6,8 +6,11 @@ La version actual se enfoca en:
 
 - Inventario tecnico de servidor, base de datos, storage, estructura, codigo SQL, seguridad y SQL Agent.
 - Alertas basicas por categoria.
-- Documentacion de procesos basada en SQL Agent jobs.
-- Lineage online para jobs, procedures, views y functions.
+- Documentacion de Jobs basada en SQL Agent.
+- Lineage basico online para jobs, procedures, views y functions.
+- Live dashboard/checks para revisar actividad actual sin persistencia.
+- Health dashboard basico con alertas consolidadas y Jobs Health accionable.
+- Impact Analysis online para revisar riesgo antes de cambiar objetos.
 - Mapas visuales de dependencias sin guardar snapshots ni historial local.
 
 ## Requisitos
@@ -39,21 +42,19 @@ http://127.0.0.1:8765
 ## Modulos
 
 - **Documentation**: documentacion basica de objetos SQL Server.
-- **Processes**: inventario de procesos, steps, SQL objects detectados, recent runs y lineage maps.
-- **Lineage**: consultas tabulares de dependencias y uso de tablas.
-- **Health**: alertas basicas por categoria.
+- **Processes**: mapas visuales de lineage para jobs, procedures, views y functions.
+- **Live**: diagnostico online de actividad actual, bloqueos, waits, TempDB y log.
+- **Operations > Review**: dashboards de Health, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review e Impact Analysis.
 
 ## Processes
 
-El modulo Processes incluye una vista estable para:
+El modulo Processes queda enfocado en mapas visuales de lineage:
 
-- `Inventory`: jobs como procesos, estado, owner, next run y ultimo resultado.
-- `Steps`: pasos de SQL Agent y comandos resumidos.
-- `SQL Objects`: objetos SQL detectados desde steps T-SQL.
-- `Recent Runs`: ejecuciones recientes del proceso.
 - `Lineage maps`: mapas para Jobs, Procedures, Views y Functions.
 
 Los mapas se generan online en cada ejecucion. No se guardan resultados en un repositorio local.
+
+La documentacion tabular de SQL Agent jobs vive dentro de **Documentation > Jobs**.
 
 ## Lineage maps
 
@@ -73,6 +74,55 @@ Incluyen:
 - Direccion inversa para tablas usadas dentro del mapa.
 
 La deteccion usa metadata de SQL Server cuando existe y heuristicas sobre comandos T-SQL cuando aplica. SQL dinamico, permisos limitados, referencias cross-database, temp tables o modulos encriptados pueden reducir la precision.
+
+## Live
+
+El modulo Live es una vista online para responder "que puede estar lento ahora?" sin guardar datos:
+
+- **Live dashboard**: semaforo, presion actual, actividad y resource pressure.
+- **Current requests**: requests activos y de larga duracion.
+- **Top active sessions**: sesiones activas por CPU, lecturas, escrituras y duracion.
+- **Blocking now** y **Root blockers**.
+- **Active waits**.
+- **TempDB usage by session**.
+- **Transaction log usage**.
+
+El dashboard permite navegar desde cada KPI al detalle correspondiente. En Settings puede habilitarse auto-refresh para refrescar la consulta Live activa cada X segundos.
+
+## Health
+
+Dentro de **Operations > Review**, Health consolida alertas basicas y revisiones operativas:
+
+- **Health dashboard**: estado general por categoria y detalle filtrado desde cada card.
+- **Jobs health**: hallazgos accionables para SQL Agent jobs.
+- **Index health**: missing indexes, indices no usados, heaps, indices deshabilitados o hipoteticos.
+- **Storage / Datafiles health**: uso de archivos, autogrowth, log usage y layout de datafiles.
+- **Waits / TempDB review**: bloqueos, waits activos, requests largos, uso de TempDB y presion del log.
+- **Impact analysis**: riesgo antes de cambiar tablas, columnas, procedures, views o functions.
+
+Jobs Health revisa:
+
+- jobs fallidos recientes,
+- jobs sin ejecucion reciente,
+- jobs sin schedule futuro activo,
+- owners no resueltos, deshabilitados o sospechosos,
+- steps con retry alto,
+- jobs deshabilitados.
+
+Health no guarda historico. Ejecuta reglas online contra SQL Server y muestra el resultado actual.
+
+## Impact Analysis
+
+Impact Analysis responde "si cambio esto, que se afecta?" usando metadata visible online:
+
+- dependencias directas e indirectas,
+- dependencias upstream/downstream,
+- triggers, computed columns y constraints relacionados,
+- jobs relacionados cuando hay credenciales de SQL Agent configuradas,
+- ultimo run visible del job cuando aplica,
+- nivel de riesgo y confianza.
+
+No ejecuta cambios ni fixes. La salida es una guia de revision previa al cambio.
 
 ## Seguridad
 

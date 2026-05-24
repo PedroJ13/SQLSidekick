@@ -20,6 +20,7 @@ AGENT_METADATA_QUERY_NAMES = {
     "process_steps",
     "process_sql_objects",
     "process_recent_runs",
+    "jobs_health_dashboard",
 }
 
 
@@ -109,6 +110,9 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/process-lineage-map":
             self.handle_process_lineage_map()
             return
+        if parsed.path == "/api/impact-analysis":
+            self.handle_impact_analysis()
+            return
         self.send_json({"error": "Ruta no encontrada."}, status=404)
 
     def handle_run_query(self) -> None:
@@ -192,6 +196,88 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
                     "processObjects": object_rows,
                     "tableFeatures": table_feature_rows,
                     **lineage,
+                }
+            )
+        except SQLServerError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": f"Error inesperado: {exc}"}, status=500)
+
+    def handle_impact_analysis(self) -> None:
+        payload = self.read_json()
+        search_text = str(payload.get("searchText", "")).strip()
+        if len(search_text) < 2:
+            self.send_json({"ok": True, "searchText": search_text, "summary": empty_impact_summary(), "resultSets": []})
+            return
+
+        try:
+            primary_settings = ConnectionSettings.from_payload(payload.get("connection", payload))
+            agent_payload = payload.get("agentConnection")
+            primary_result = execute_query(primary_settings, impact_analysis_sql(search_text))
+            primary_rows = primary_result.get("resultSets", [{}])[0].get("rows", [])
+            job_rows: list[dict[str, Any]] = []
+            job_error = ""
+
+            if agent_payload:
+                try:
+                    queries = load_named_queries(self.queries_path, version="full")
+                    agent_settings = ConnectionSettings.from_payload(agent_payload)
+                    process_objects = execute_query(agent_settings, queries["process_sql_objects"].sql)
+                    process_rows = process_objects.get("resultSets", [{}])[0].get("rows", [])
+                    lineage = execute_query(primary_settings, lineage_from_process_objects_sql("process_lineage", process_rows))
+                    lineage_rows = lineage.get("resultSets", [{}])[0].get("rows", [])
+                    recent_runs = execute_query(agent_settings, queries["process_recent_runs"].sql)
+                    run_rows = recent_runs.get("resultSets", [{}])[0].get("rows", [])
+                    job_rows = build_impact_job_rows(search_text, primary_rows, lineage_rows, process_rows, run_rows)
+                except Exception as exc:
+                    job_error = str(exc)
+
+            all_rows = primary_rows + job_rows
+            if job_error:
+                all_rows.append(
+                    {
+                        "impact_section": "Jobs",
+                        "impact_direction": "Operational",
+                        "impact_depth": None,
+                        "affected_schema": None,
+                        "affected_object": "SQL Agent metadata unavailable",
+                        "affected_type": "Access",
+                        "referenced_schema": None,
+                        "referenced_object": search_text,
+                        "referenced_column": None,
+                        "evidence": job_error,
+                        "code_fragment": None,
+                        "confidence": "Low",
+                        "risk_signal": "Job impact could not be evaluated with the configured credentials.",
+                    }
+                )
+
+            summary = summarize_impact(search_text, all_rows, job_error)
+            self.send_json(
+                {
+                    "ok": True,
+                    "searchText": search_text,
+                    "summary": summary,
+                    "resultSets": [
+                        {
+                            "columns": [
+                                "impact_section",
+                                "impact_direction",
+                                "impact_depth",
+                                "affected_schema",
+                                "affected_object",
+                                "affected_type",
+                                "referenced_schema",
+                                "referenced_object",
+                                "referenced_column",
+                                "evidence",
+                                "code_fragment",
+                                "confidence",
+                                "risk_signal",
+                            ],
+                            "rows": all_rows,
+                        }
+                    ],
                 }
             )
         except SQLServerError as exc:
@@ -521,6 +607,440 @@ def nullable_int_literal(value: Any) -> str:
         return str(int(value))
     except (TypeError, ValueError):
         return "NULL"
+
+
+def impact_analysis_sql(search_text: str) -> str:
+    return f"""
+DECLARE @search nvarchar(512) = {sql_literal(search_text)};
+DECLARE @clean nvarchar(512) = REPLACE(REPLACE(LTRIM(RTRIM(@search)), '[', ''), ']', '');
+DECLARE @parts int = LEN(@clean) - LEN(REPLACE(@clean, '.', '')) + 1;
+DECLARE @search_schema sysname = CASE WHEN @parts >= 2 THEN PARSENAME(@clean, CASE WHEN @parts >= 3 THEN 3 ELSE 2 END) END;
+DECLARE @search_object sysname = CASE WHEN @parts >= 2 THEN PARSENAME(@clean, CASE WHEN @parts >= 3 THEN 2 ELSE 1 END) ELSE @clean END;
+DECLARE @search_column sysname = CASE WHEN @parts >= 3 THEN PARSENAME(@clean, 1) END;
+
+WITH object_catalog AS (
+    SELECT
+        o.object_id,
+        s.name AS schema_name,
+        o.name AS object_name,
+        o.type_desc,
+        sm.definition,
+        CONCAT(s.name, N'.', o.name) AS full_name
+    FROM sys.objects AS o
+    INNER JOIN sys.schemas AS s
+        ON s.schema_id = o.schema_id
+    LEFT JOIN sys.sql_modules AS sm
+        ON sm.object_id = o.object_id
+    WHERE o.is_ms_shipped = 0
+),
+target_objects AS (
+    SELECT DISTINCT
+        oc.object_id,
+        oc.schema_name,
+        oc.object_name,
+        oc.type_desc
+    FROM object_catalog AS oc
+    LEFT JOIN sys.columns AS c
+        ON c.object_id = oc.object_id
+       AND (@search_column IS NULL OR c.name = @search_column)
+    WHERE (
+            (@search_schema IS NOT NULL AND oc.schema_name = @search_schema AND oc.object_name = @search_object)
+         OR (@search_schema IS NULL AND (oc.object_name = @search_object OR oc.full_name LIKE N'%' + @clean + N'%'))
+      )
+      AND (@search_column IS NULL OR c.column_id IS NOT NULL)
+),
+dependency_edges AS (
+    SELECT DISTINCT
+        sed.referencing_id,
+        sed.referenced_id,
+        sed.referenced_minor_id,
+        COALESCE(ref_schema.name, sed.referenced_schema_name) AS referenced_schema,
+        COALESCE(ref_obj.name, sed.referenced_entity_name) AS referenced_object,
+        ref_obj.type_desc AS referenced_type,
+        ref_col.name AS referenced_column,
+        referrer.schema_name AS referencing_schema,
+        referrer.object_name AS referencing_object,
+        referrer.type_desc AS referencing_type,
+        referrer.definition AS referencing_definition
+    FROM sys.sql_expression_dependencies AS sed
+    INNER JOIN object_catalog AS referrer
+        ON referrer.object_id = sed.referencing_id
+    LEFT JOIN sys.objects AS ref_obj
+        ON ref_obj.object_id = sed.referenced_id
+    LEFT JOIN sys.schemas AS ref_schema
+        ON ref_schema.schema_id = ref_obj.schema_id
+    LEFT JOIN sys.columns AS ref_col
+        ON ref_col.object_id = sed.referenced_id
+       AND ref_col.column_id = sed.referenced_minor_id
+    WHERE sed.referenced_database_name IS NULL
+),
+downstream AS (
+    SELECT
+        CAST(1 AS int) AS impact_depth,
+        edge.referencing_id AS affected_id,
+        edge.referencing_schema,
+        edge.referencing_object,
+        edge.referencing_type,
+        edge.referenced_schema,
+        edge.referenced_object,
+        edge.referenced_type,
+        edge.referenced_column,
+        edge.referencing_definition,
+        CAST(CONCAT(N'|', target.object_id, N'|', edge.referencing_id, N'|') AS nvarchar(max)) AS path_ids
+    FROM dependency_edges AS edge
+    INNER JOIN target_objects AS target
+        ON target.object_id = edge.referenced_id
+    WHERE @search_column IS NULL
+       OR edge.referenced_minor_id = 0
+       OR edge.referenced_column = @search_column
+
+    UNION ALL
+
+    SELECT
+        previous.impact_depth + 1,
+        edge.referencing_id,
+        edge.referencing_schema,
+        edge.referencing_object,
+        edge.referencing_type,
+        edge.referenced_schema,
+        edge.referenced_object,
+        edge.referenced_type,
+        edge.referenced_column,
+        edge.referencing_definition,
+        CAST(previous.path_ids + CONVERT(nvarchar(20), edge.referencing_id) + N'|' AS nvarchar(max))
+    FROM dependency_edges AS edge
+    INNER JOIN downstream AS previous
+        ON previous.affected_id = edge.referenced_id
+    WHERE previous.impact_depth < 3
+      AND previous.path_ids NOT LIKE N'%|' + CONVERT(nvarchar(20), edge.referencing_id) + N'|%'
+),
+upstream AS (
+    SELECT
+        edge.referenced_schema,
+        edge.referenced_object,
+        edge.referenced_type,
+        edge.referenced_column,
+        edge.referencing_schema,
+        edge.referencing_object,
+        edge.referencing_type,
+        edge.referenced_id,
+        edge.referencing_definition
+    FROM dependency_edges AS edge
+    INNER JOIN target_objects AS target
+        ON target.object_id = edge.referencing_id
+),
+table_features AS (
+    SELECT
+        'Table feature' AS impact_section,
+        'Downstream' AS impact_direction,
+        CAST(1 AS int) AS impact_depth,
+        OBJECT_SCHEMA_NAME(t.object_id) AS affected_schema,
+        tr.name AS affected_object,
+        CONCAT('Trigger - ', CASE WHEN tr.is_disabled = 1 THEN 'Disabled' ELSE 'Enabled' END) AS affected_type,
+        OBJECT_SCHEMA_NAME(t.object_id) AS referenced_schema,
+        OBJECT_NAME(t.object_id) AS referenced_object,
+        CAST(NULL AS sysname) AS referenced_column,
+        CONCAT(
+            'Trigger events: ',
+            CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsInsertTrigger') = 1 THEN 'INSERT ' ELSE '' END,
+            CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsUpdateTrigger') = 1 THEN 'UPDATE ' ELSE '' END,
+            CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsDeleteTrigger') = 1 THEN 'DELETE ' ELSE '' END
+        ) AS evidence,
+        trm.definition AS code_fragment,
+        'High' AS confidence,
+        'DML behavior can change when this table changes.' AS risk_signal
+    FROM target_objects AS t
+    INNER JOIN sys.triggers AS tr
+        ON tr.parent_id = t.object_id
+    LEFT JOIN sys.sql_modules AS trm
+        ON trm.object_id = tr.object_id
+
+    UNION ALL
+
+    SELECT
+        'Table feature',
+        'Downstream',
+        1,
+        OBJECT_SCHEMA_NAME(t.object_id),
+        c.name,
+        'Computed column',
+        OBJECT_SCHEMA_NAME(t.object_id),
+        OBJECT_NAME(t.object_id),
+        c.name,
+        cc.definition,
+        cc.definition,
+        CASE WHEN @search_column IS NULL OR cc.definition LIKE N'%' + @search_column + N'%' THEN 'Medium' ELSE 'Low' END,
+        'Computed column expression should be reviewed before table or column changes.'
+    FROM target_objects AS t
+    INNER JOIN sys.computed_columns AS c
+        ON c.object_id = t.object_id
+    INNER JOIN sys.computed_columns AS cc
+        ON cc.object_id = c.object_id
+       AND cc.column_id = c.column_id
+    WHERE @search_column IS NULL
+       OR c.name = @search_column
+       OR cc.definition LIKE N'%' + @search_column + N'%'
+
+    UNION ALL
+
+    SELECT
+        'Table feature',
+        'Downstream',
+        1,
+        OBJECT_SCHEMA_NAME(t.object_id),
+        chk.name,
+        'Check constraint',
+        OBJECT_SCHEMA_NAME(t.object_id),
+        OBJECT_NAME(t.object_id),
+        CAST(NULL AS sysname),
+        chk.definition,
+        chk.definition,
+        CASE WHEN @search_column IS NULL OR chk.definition LIKE N'%' + @search_column + N'%' THEN 'Medium' ELSE 'Low' END,
+        'Constraint can block data changes after schema or data shape changes.'
+    FROM target_objects AS t
+    INNER JOIN sys.check_constraints AS chk
+        ON chk.parent_object_id = t.object_id
+    WHERE @search_column IS NULL
+       OR chk.definition LIKE N'%' + @search_column + N'%'
+)
+SELECT DISTINCT
+    'Object dependency' AS impact_section,
+    'Downstream' AS impact_direction,
+    downstream.impact_depth,
+    downstream.referencing_schema AS affected_schema,
+    downstream.referencing_object AS affected_object,
+    downstream.referencing_type AS affected_type,
+    downstream.referenced_schema,
+    downstream.referenced_object,
+    downstream.referenced_column,
+    CONCAT('Dependency depth ', downstream.impact_depth) AS evidence,
+    CASE
+        WHEN downstream.referencing_definition IS NOT NULL
+         AND CHARINDEX(downstream.referenced_object, downstream.referencing_definition) > 0
+        THEN SUBSTRING(
+            downstream.referencing_definition,
+            CASE WHEN CHARINDEX(downstream.referenced_object, downstream.referencing_definition) > 180
+                THEN CHARINDEX(downstream.referenced_object, downstream.referencing_definition) - 180
+                ELSE 1
+            END,
+            700
+        )
+        ELSE NULL
+    END AS code_fragment,
+    CASE WHEN downstream.impact_depth = 1 THEN 'High' WHEN downstream.impact_depth = 2 THEN 'Medium' ELSE 'Low' END AS confidence,
+    CASE WHEN downstream.impact_depth = 1 THEN 'Direct dependency can break on schema changes.' ELSE 'Indirect dependency may be affected through another object.' END AS risk_signal
+FROM downstream
+
+UNION ALL
+
+SELECT DISTINCT
+    'Object dependency',
+    'Upstream',
+    CAST(1 AS int),
+    upstream.referenced_schema,
+    upstream.referenced_object,
+    upstream.referenced_type,
+    upstream.referencing_schema,
+    upstream.referencing_object,
+    upstream.referenced_column,
+    'Object referenced by selected object',
+    CASE
+        WHEN upstream.referencing_definition IS NOT NULL
+         AND CHARINDEX(upstream.referenced_object, upstream.referencing_definition) > 0
+        THEN SUBSTRING(
+            upstream.referencing_definition,
+            CASE WHEN CHARINDEX(upstream.referenced_object, upstream.referencing_definition) > 180
+                THEN CHARINDEX(upstream.referenced_object, upstream.referencing_definition) - 180
+                ELSE 1
+            END,
+            700
+        )
+        ELSE NULL
+    END,
+    'High',
+    'Changing this upstream object can affect the selected object.'
+FROM upstream
+WHERE upstream.referenced_object IS NOT NULL
+  AND upstream.referenced_id IS NOT NULL
+
+UNION ALL
+
+SELECT
+    impact_section,
+    impact_direction,
+    impact_depth,
+    affected_schema,
+    affected_object,
+    affected_type,
+    referenced_schema,
+    referenced_object,
+    referenced_column,
+    evidence,
+    code_fragment,
+    confidence,
+    risk_signal
+FROM table_features
+ORDER BY impact_section, impact_direction, impact_depth, affected_schema, affected_object
+OPTION (MAXRECURSION 25);
+"""
+
+
+def empty_impact_summary() -> dict[str, Any]:
+    return {
+        "risk": "Unknown",
+        "direct_count": 0,
+        "indirect_count": 0,
+        "job_count": 0,
+        "feature_count": 0,
+        "confidence": "Low",
+        "reason": "Search for a table, column, procedure, view, or function to analyze impact.",
+        "suggested_action": "Enter an object name such as dbo.Customer or dbo.Customer.Email.",
+    }
+
+
+def object_key(schema: Any, name: Any) -> str:
+    if not name:
+        return ""
+    return f"{str(schema or 'dbo').lower()}.{str(name).lower()}"
+
+
+def build_impact_job_rows(
+    search_text: str,
+    primary_rows: list[dict[str, Any]],
+    lineage_rows: list[dict[str, Any]],
+    process_rows: list[dict[str, Any]],
+    run_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cleaned = search_text.replace("[", "").replace("]", "").strip().lower()
+    search_parts = [part for part in cleaned.split(".") if part]
+    search_name = search_parts[-2] if len(search_parts) >= 3 else search_parts[-1] if search_parts else cleaned
+    search_schema = search_parts[-3] if len(search_parts) >= 3 else search_parts[-2] if len(search_parts) >= 2 else ""
+    impacted_objects = {
+        object_key(row.get("affected_schema"), row.get("affected_object"))
+        for row in primary_rows
+        if row.get("affected_object")
+        and str(row.get("impact_section", "")).lower() == "object dependency"
+        and str(row.get("impact_direction", "")).lower() == "downstream"
+    }
+    names_to_match = impacted_objects
+    if search_schema and search_name:
+        names_to_match.add(f"{search_schema}.{search_name}")
+    elif search_name:
+        names_to_match.add(f"dbo.{search_name}")
+    if search_name:
+        names_to_match.add(f"dbo.{search_name}")
+
+    latest_runs: dict[str, dict[str, Any]] = {}
+    for run in run_rows:
+        process_name = str(run.get("process_name") or "")
+        if process_name and process_name not in latest_runs and not process_name.lower().startswith("the "):
+            latest_runs[process_name] = run
+
+    rows_by_key: dict[str, dict[str, Any]] = {}
+    combined_lineage = list(lineage_rows)
+    for process in process_rows:
+        combined_lineage.append(
+            {
+                "process_name": process.get("process_name"),
+                "step_order": process.get("step_order"),
+                "step_name": process.get("step_name"),
+                "database_name": process.get("database_name"),
+                "called_schema": process.get("schema_name") or "dbo",
+                "called_object_name": process.get("object_name"),
+                "called_object_type": process.get("object_type"),
+                "referenced_schema": None,
+                "referenced_object": None,
+                "confidence": process.get("confidence"),
+                "command_preview": process.get("command_preview"),
+            }
+        )
+
+    for row in combined_lineage:
+        called_key = object_key(row.get("called_schema"), row.get("called_object_name"))
+        referenced_key = object_key(row.get("referenced_schema"), row.get("referenced_object"))
+        called_name = str(row.get("called_object_name") or "").lower()
+        referenced_name = str(row.get("referenced_object") or "").lower()
+        matches = (
+            called_key in names_to_match
+            or referenced_key in names_to_match
+            or (
+                not search_schema
+                and search_name
+                and (called_name == search_name or referenced_name == search_name)
+            )
+        )
+        if not matches:
+            continue
+        process_name = row.get("process_name")
+        if not process_name:
+            continue
+        run = latest_runs.get(str(process_name), {})
+        key = f"{process_name}|{row.get('step_order')}|{called_key or referenced_key}"
+        candidate = {
+            "impact_section": "Jobs",
+            "impact_direction": "Operational",
+            "impact_depth": row.get("step_order"),
+            "affected_schema": None,
+            "affected_object": process_name,
+            "affected_type": f"Job step {row.get('step_order') or '-'}",
+            "referenced_schema": row.get("called_schema") or row.get("referenced_schema"),
+            "referenced_object": row.get("called_object_name") or row.get("referenced_object"),
+            "referenced_column": None,
+            "evidence": f"Step: {row.get('step_name') or '-'}; Last run: {run.get('run_status') or 'Unknown'} {run.get('run_datetime') or ''}".strip(),
+            "code_fragment": row.get("command_preview"),
+            "confidence": row.get("confidence") or "Medium",
+            "risk_signal": "Related SQL Agent job may fail or load stale data after this change.",
+        }
+        existing = rows_by_key.get(key)
+        if not existing or confidence_rank(candidate.get("confidence")) < confidence_rank(existing.get("confidence")):
+            rows_by_key[key] = candidate
+
+    return list(rows_by_key.values())
+
+
+def confidence_rank(value: Any) -> int:
+    ranks = {"high": 0, "medium": 1, "low": 2}
+    return ranks.get(str(value or "").lower(), 3)
+
+
+def summarize_impact(search_text: str, rows: list[dict[str, Any]], job_error: str = "") -> dict[str, Any]:
+    direct_count = sum(1 for row in rows if row.get("impact_section") == "Object dependency" and row.get("impact_direction") == "Downstream" and row.get("impact_depth") == 1)
+    indirect_count = sum(1 for row in rows if row.get("impact_section") == "Object dependency" and row.get("impact_direction") == "Downstream" and (row.get("impact_depth") or 0) > 1)
+    job_names = {row.get("affected_object") for row in rows if row.get("impact_section") == "Jobs" and row.get("affected_object") != "SQL Agent metadata unavailable"}
+    feature_count = sum(1 for row in rows if row.get("impact_section") == "Table feature")
+    high_confidence = sum(1 for row in rows if str(row.get("confidence") or "").lower() == "high")
+    low_confidence = sum(1 for row in rows if str(row.get("confidence") or "").lower() == "low")
+
+    if job_names or direct_count >= 3 or feature_count >= 2:
+        risk = "High"
+    elif direct_count or indirect_count or feature_count or job_error:
+        risk = "Medium"
+    else:
+        risk = "Low"
+
+    confidence = "High" if high_confidence and not low_confidence else "Medium" if rows else "Low"
+    reasons: list[str] = []
+    if direct_count:
+        reasons.append(f"{direct_count} direct object(s)")
+    if indirect_count:
+        reasons.append(f"{indirect_count} indirect object(s)")
+    if job_names:
+        reasons.append(f"{len(job_names)} related job(s)")
+    if feature_count:
+        reasons.append(f"{feature_count} table feature(s)")
+    if job_error:
+        reasons.append("job metadata is partial")
+
+    return {
+        "risk": risk,
+        "direct_count": direct_count,
+        "indirect_count": indirect_count,
+        "job_count": len(job_names),
+        "feature_count": feature_count,
+        "confidence": confidence,
+        "reason": f"{search_text}: " + (", ".join(reasons) if reasons else "no known impact found with visible metadata."),
+        "suggested_action": "Review affected objects and related jobs before changing this object. Treat Low confidence rows as incomplete metadata, not as safe.",
+    }
 
 
 def lineage_from_process_objects_sql(query_name: str, rows: list[dict[str, Any]]) -> str:

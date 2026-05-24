@@ -1,4 +1,4 @@
-const DOCUMENTATION_GROUPS = [
+const OBJECT_DOCUMENTATION_GROUPS = [
   {
     title: "Server",
     collapsed: true,
@@ -33,17 +33,25 @@ const DOCUMENTATION_GROUPS = [
     title: "Security",
     names: ["database_principals", "database_roles", "database_role_members", "database_permissions"],
   },
-  {
-    title: "Jobs",
-    names: ["sql_agent_jobs", "sql_agent_job_steps", "sql_agent_job_schedules", "sql_agent_job_history"],
-  },
   { title: "Analysis", names: ["review_findings", "index_usage", "index_physical_stats", "missing_indexes", "statistics"] },
 ];
 
 const PROCESS_GROUPS = [
   {
+    title: "Process inventory",
+    names: ["process_inventory", "process_steps", "process_sql_objects", "process_recent_runs"],
+  },
+  {
+    title: "SQL Agent Jobs",
+    names: ["sql_agent_jobs", "sql_agent_job_steps", "sql_agent_job_schedules", "sql_agent_job_history"],
+  },
+  {
     title: "Lineage maps",
     names: ["job_lineage_map", "procedure_lineage_map", "view_lineage_map", "function_lineage_map"],
+  },
+  {
+    title: "Lineage tables",
+    names: ["object_references", "table_usage", "process_lineage", "used_by_jobs"],
   },
 ];
 
@@ -67,6 +75,14 @@ const HEALTH_GROUPS = [
     title: "Overview",
     names: ["health_dashboard"],
   },
+  {
+    title: "Health checks",
+    names: ["jobs_health_dashboard", "index_health_dashboard", "storage_datafiles_health", "waits_tempdb_review"],
+  },
+  {
+    title: "Impact",
+    names: ["impact_analysis"],
+  },
 ];
 
 const NAV_AREAS = [
@@ -76,35 +92,39 @@ const NAV_AREAS = [
     pill: "Documentation module",
     heading: "Documentation",
     emptyTitle: "Choose a section",
-    emptyDescription: "Select a documentation group from the left menu to review the discovered characteristics.",
-    groups: DOCUMENTATION_GROUPS,
+    emptyDescription: "Select Objects for database inventory or Processes for operational lineage.",
+    sections: [
+      {
+        title: "Objects",
+        description: "Database inventory and object documentation.",
+        groups: OBJECT_DOCUMENTATION_GROUPS,
+      },
+      {
+        title: "Processes",
+        description: "Jobs, process steps, detected SQL objects, and lineage maps.",
+        groups: PROCESS_GROUPS,
+      },
+    ],
   },
   {
-    id: "processes",
-    title: "Processes",
-    pill: "Processes module",
-    heading: "Processes",
-    emptyTitle: "Processes are next",
-    emptyDescription: "This area will evolve into process maps, ownership, lineage, and impact analysis after the job documentation is stable.",
-    groups: PROCESS_GROUPS,
-  },
-  {
-    id: "live",
-    title: "Live",
-    pill: "Live monitor",
-    heading: "Live monitor",
-    emptyTitle: "Choose a live check",
-    emptyDescription: "Run online checks for current requests, blocking, waits, tempdb usage, and log pressure.",
-    groups: LIVE_GROUPS,
-  },
-  {
-    id: "health",
-    title: "Health",
-    pill: "Health module",
-    heading: "Health",
-    emptyTitle: "Health checks",
-    emptyDescription: "Review consolidated alert status across documentation, jobs, and operational checks.",
-    groups: HEALTH_GROUPS,
+    id: "operations",
+    title: "Operations",
+    pill: "Operations module",
+    heading: "Operations",
+    emptyTitle: "Choose an operational section",
+    emptyDescription: "Use Live for current activity and Review for consolidated health checks.",
+    sections: [
+      {
+        title: "Live",
+        description: "Current requests, blocking, waits, tempdb, and log pressure.",
+        groups: LIVE_GROUPS,
+      },
+      {
+        title: "Review",
+        description: "Consolidated health status and alert checks.",
+        groups: HEALTH_GROUPS,
+      },
+    ],
   },
 ];
 
@@ -209,9 +229,8 @@ const LIVE_REFRESH_ENABLED_KEY = "sqlsidekick.liveRefreshEnabled";
 const LIVE_REFRESH_SECONDS_KEY = "sqlsidekick.liveRefreshSeconds";
 const TABLE_PAGE_SIZE = 50;
 const DEFAULT_QUERY_BY_AREA = {
-  live: "live_dashboard",
-  processes: "job_lineage_map",
-  health: "health_dashboard",
+  documentation: "database_overview",
+  operations: "live_dashboard",
 };
 const HEALTH_ALERT_TARGETS = [
   { title: "Server", category: "server" },
@@ -260,6 +279,7 @@ const AGENT_METADATA_QUERIES = new Set([
   "process_steps",
   "process_sql_objects",
   "process_recent_runs",
+  "jobs_health_dashboard",
 ]);
 
 const GROUP_CATEGORY_SLUGS = {
@@ -271,7 +291,10 @@ const GROUP_CATEGORY_SLUGS = {
   "SQL Code": "code",
   "DB Users / Roles": "security",
   "SQL Agent Jobs": "jobs",
+  "Process inventory": "processes",
   Jobs: "processes",
+  "Lineage maps": "processes",
+  "Lineage tables": "lineage",
   Security: "security",
   Analysis: "analysis",
   Operations: "operations",
@@ -279,8 +302,10 @@ const GROUP_CATEGORY_SLUGS = {
   Documentation: "documentation",
   Processes: "processes",
   Lineage: "lineage",
+  Dashboard: "live",
   Live: "live",
   Overview: "health",
+  Review: "health",
   Health: "health",
 };
 
@@ -319,6 +344,8 @@ const state = {
   processMapLabel: "Job",
   processMapNameByType: loadProcessMapSelections(),
   processMapDetails: {},
+  impactSearchText: "",
+  impactSummary: null,
 };
 
 const els = {
@@ -665,11 +692,64 @@ async function loadDefaultConnection() {
 function renderQueryMenu() {
   els.queryList.innerHTML = "";
   const area = getActiveArea();
-  const groups = getVisibleGroups(area);
-  const usedNames = new Set(getAllQueryGroups().flatMap((group) => group.names));
+  const sections = getVisibleSections(area);
   updateAreaChrome(area);
 
-  groups.forEach((group, index) => {
+  sections.forEach((section, sectionIndex) => {
+    const sectionDetails = document.createElement("details");
+    sectionDetails.className = "menu-section";
+    sectionDetails.open = section.collapsed ? false : sectionIndex < 2;
+
+    const sectionSummary = document.createElement("summary");
+    const sectionTitle = document.createElement("span");
+    sectionTitle.className = "menu-section-title";
+    sectionTitle.textContent = section.title;
+    sectionSummary.appendChild(sectionTitle);
+    sectionDetails.appendChild(sectionSummary);
+
+    if (section.description) {
+      const description = document.createElement("p");
+      description.className = "menu-section-description";
+      description.textContent = section.description;
+      sectionDetails.appendChild(description);
+    }
+
+    const groupWrap = document.createElement("div");
+    groupWrap.className = "menu-section-groups";
+
+    section.groups.forEach((group, index) => {
+      const groupElement = createMenuGroup(group, index);
+      if (groupElement) {
+        groupWrap.appendChild(groupElement);
+      }
+    });
+
+    if (groupWrap.children.length > 0) {
+      sectionDetails.appendChild(groupWrap);
+      els.queryList.appendChild(sectionDetails);
+    }
+  });
+
+  if (els.queryList.children.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "module-empty";
+    empty.innerHTML = `
+      <strong>${escapeHtml(area.emptyTitle)}</strong>
+      <span>${escapeHtml(area.emptyDescription)}</span>
+    `;
+    els.queryList.appendChild(empty);
+  }
+  renderGroupAlertBadges();
+}
+
+function createMenuGroup(group, index = 0) {
+  const visibleQueries = group.names
+    .map((name) => state.queries.find((query) => query.name === name))
+    .filter(Boolean);
+  if (visibleQueries.length === 0) {
+    return null;
+  }
+
     const details = document.createElement("details");
     details.className = "menu-group";
     details.dataset.category = groupCategorySlug(group.title);
@@ -688,30 +768,12 @@ function renderQueryMenu() {
     const items = document.createElement("div");
     items.className = "menu-items";
 
-    group.names
-      .map((name) => state.queries.find((query) => query.name === name))
-      .filter(Boolean)
-      .forEach((query) => {
-        usedNames.add(query.name);
-        items.appendChild(createQueryButton(query, group.title));
-      });
+    visibleQueries.forEach((query) => {
+      items.appendChild(createQueryButton(query, group.title));
+    });
 
-    if (items.children.length > 0) {
-      details.appendChild(items);
-      els.queryList.appendChild(details);
-    }
-  });
-
-  if (els.queryList.children.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "module-empty";
-    empty.innerHTML = `
-      <strong>${escapeHtml(area.emptyTitle)}</strong>
-      <span>${escapeHtml(area.emptyDescription)}</span>
-    `;
-    els.queryList.appendChild(empty);
-  }
-  renderGroupAlertBadges();
+    details.appendChild(items);
+    return details;
 }
 
 function renderModuleTabs() {
@@ -752,11 +814,35 @@ function getActiveArea() {
 }
 
 function getAllQueryGroups() {
-  return NAV_AREAS.flatMap((area) => area.groups);
+  return NAV_AREAS.flatMap((area) => getAreaSections(area).flatMap((section) => section.groups));
 }
 
 function getVisibleGroups(area = getActiveArea()) {
-  return area.groups.filter((group) => group.names.some((name) => state.queries.some((query) => query.name === name)));
+  return getVisibleSections(area).flatMap((section) => section.groups);
+}
+
+function getAreaSections(area = getActiveArea()) {
+  if (Array.isArray(area.sections)) {
+    return area.sections;
+  }
+  return [
+    {
+      title: area.title,
+      description: area.emptyDescription,
+      groups: area.groups || [],
+    },
+  ];
+}
+
+function getVisibleSections(area = getActiveArea()) {
+  return getAreaSections(area)
+    .map((section) => ({
+      ...section,
+      groups: (section.groups || []).filter((group) =>
+        group.names.some((name) => state.queries.some((query) => query.name === name))
+      ),
+    }))
+    .filter((section) => section.groups.length > 0);
 }
 
 async function runDefaultQueryForArea(areaId) {
@@ -1009,7 +1095,9 @@ function openAlertsPanel() {
 
 function renderAlertsTable() {
   const visibleColumns = state.alerts.columns.filter((column) => column !== "highest_detected_severity");
-  const headers = visibleColumns.map((column) => `<th>${escapeHtml(labelize(column))}</th>`).join("");
+  const headers = [
+    ...visibleColumns.map((column) => `<th>${escapeHtml(labelize(column))}</th>`),
+  ].join("");
   const rows = state.alerts.rows
     .map((row) => {
       const severity = String(row.severity || "").toLowerCase();
@@ -1019,7 +1107,7 @@ function renderAlertsTable() {
       return `<tr class="alert-row alert-${escapeHtml(severity)}">${cells}</tr>`;
     })
     .join("");
-  return `
+  const html = `
     <div class="alerts-summary">
       <strong>${state.alerts.rows.length}</strong>
       <span>active alerts detected for this category.</span>
@@ -1031,6 +1119,7 @@ function renderAlertsTable() {
       </table>
     </div>
   `;
+  return html;
 }
 
 async function testConnection(event) {
@@ -1089,6 +1178,10 @@ async function runActiveQuery() {
       await runHealthView();
       return;
     }
+    if (isImpactAnalysisQuery()) {
+      await runImpactAnalysis();
+      return;
+    }
     const isMixedLineage = shouldUseMixedLineageQuery();
     if (isMixedLineage && !shouldUseAgentConnection()) {
       state.columns = [];
@@ -1114,6 +1207,11 @@ async function runActiveQuery() {
     state.tablePage = 1;
     state.filterColumn = getDefaultFilterColumn();
     updateTableFilterUI();
+    if (isReviewDashboardQuery()) {
+      renderJobsHealthDashboard();
+      clearMessage(els.message);
+      return;
+    }
     if (isMixedLineage && state.rows.length === 0) {
       renderResults();
       renderEmptyTable("No lineage rows found. Check SQL Agent credentials and job step visibility.");
@@ -1173,6 +1271,19 @@ function markQueryFailed(queryName, reason) {
 
 function isHealthQuery() {
   return state.activeQuery?.name === "health_dashboard";
+}
+
+function isReviewDashboardQuery() {
+  return [
+    "jobs_health_dashboard",
+    "index_health_dashboard",
+    "storage_datafiles_health",
+    "waits_tempdb_review",
+  ].includes(state.activeQuery?.name);
+}
+
+function isImpactAnalysisQuery() {
+  return state.activeQuery?.name === "impact_analysis";
 }
 
 async function runHealthView() {
@@ -1357,6 +1468,341 @@ function formatHealthStatus(severity) {
   if (severity === "low") return "Minor findings";
   if (severity === "unknown") return "Incomplete";
   return "Healthy";
+}
+
+function renderJobsHealthDashboard() {
+  const rows = state.rows || [];
+  const highCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "high").length;
+  const mediumCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "medium").length;
+  const lowCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "low").length;
+  const overallSeverity = highCount > 0 ? "high" : mediumCount > 0 ? "medium" : lowCount > 0 ? "low" : "good";
+  const totalFindings = rows.length;
+  els.message.classList.add("hidden");
+  els.tableTools.classList.add("hidden");
+  els.tableWrap.classList.add("hidden");
+  els.pagination.classList.add("hidden");
+  els.exportCsv.disabled = rows.length === 0;
+  els.rowCount.textContent = String(rows.length);
+  els.columnCount.textContent = String(state.columns.length);
+  els.cardView.classList.remove("hidden");
+  els.cardView.innerHTML = `
+    <section class="health-summary health-${escapeHtml(overallSeverity)}">
+      <div>
+        <span class="health-eyebrow">${escapeHtml(getReviewDashboardLabel())}</span>
+        <strong>${escapeHtml(formatHealthStatus(overallSeverity))}</strong>
+        <p>${escapeHtml(totalFindings > 0 ? `${totalFindings} finding(s) detected.` : "No active findings detected.")}</p>
+      </div>
+      <div class="health-summary-actions">
+        <button class="health-view-all" type="button" data-jobs-health-all title="View all findings" aria-label="View all job health findings">
+          <span aria-hidden="true">i</span>
+        </button>
+        <div class="health-totals">
+          ${renderJobsHealthTotal("High", highCount, "high")}
+          ${renderJobsHealthTotal("Medium", mediumCount, "medium")}
+          ${renderJobsHealthTotal("Low", lowCount, "low")}
+        </div>
+      </div>
+    </section>
+    <section class="health-category-grid">
+      ${renderJobsHealthCategoryCards(rows)}
+    </section>
+  `;
+  bindJobsHealthControls();
+}
+
+function getReviewDashboardLabel() {
+  const labels = {
+    jobs_health_dashboard: "Jobs status",
+    index_health_dashboard: "Index status",
+    storage_datafiles_health: "Storage status",
+    waits_tempdb_review: "Waits / TempDB status",
+    impact_analysis: "Impact analysis",
+  };
+  return labels[state.activeQuery?.name] || "Review status";
+}
+
+function renderJobsHealthTotal(label, count, severity) {
+  return `
+    <button class="health-total severity-${escapeHtml(severity)}" type="button" data-jobs-health-severity="${escapeHtml(severity)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)} findings: ${escapeHtml(count)}">
+      <strong>${escapeHtml(count)}</strong>
+    </button>
+  `;
+}
+
+function renderJobsHealthCategoryCards(rows) {
+  const areaOrderByQuery = {
+    jobs_health_dashboard: ["Recent failures", "Stale execution", "Scheduling", "Ownership", "Retries", "Status", "Access"],
+    index_health_dashboard: ["Missing indexes", "Unused indexes", "Heaps", "Disabled indexes", "Hypothetical indexes", "Access"],
+    storage_datafiles_health: ["Space usage", "Autogrowth", "Log usage", "File layout", "Access"],
+    waits_tempdb_review: ["Blocking", "Active waits", "Long running", "TempDB", "Log usage", "Access"],
+  };
+  const preferredAreas = areaOrderByQuery[state.activeQuery?.name] || [];
+  const dynamicAreas = Array.from(new Set(rows.map((row) => String(row.health_area || "Other")).filter(Boolean)));
+  const areas = [...preferredAreas, ...dynamicAreas.filter((area) => !preferredAreas.includes(area))];
+  return areas
+    .map((area) => {
+      const areaRows = rows.filter((row) => String(row.health_area || "") === area);
+      if (areaRows.length === 0) return "";
+      const severity = getHighestAlertSeverity({ rows: areaRows });
+      const topFinding = areaRows[0]?.check_name || "No active findings.";
+      return `
+        <button class="health-category-card health-${escapeHtml(severity)}" type="button" data-jobs-health-area="${escapeHtml(area)}" title="View ${escapeHtml(area)} findings">
+          <div class="health-card-head">
+            <span class="health-dot severity-${escapeHtml(severity)}"></span>
+            <strong>${escapeHtml(area)} (${escapeHtml(areaRows.length)})</strong>
+          </div>
+          <p>${escapeHtml(topFinding)}</p>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function bindJobsHealthControls() {
+  els.cardView.querySelectorAll("[data-jobs-health-area]").forEach((button) => {
+    button.addEventListener("click", () => {
+      openJobsHealthFindings(button.dataset.jobsHealthArea || getReviewDashboardLabel(), state.rows.filter((row) => row.health_area === button.dataset.jobsHealthArea));
+    });
+  });
+  els.cardView.querySelectorAll("[data-jobs-health-severity]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const severity = button.dataset.jobsHealthSeverity;
+      openJobsHealthFindings(labelize(severity), state.rows.filter((row) => normalizeAlertSeverity(row.severity) === severity));
+    });
+  });
+  const allButton = els.cardView.querySelector("[data-jobs-health-all]");
+  if (allButton) {
+    allButton.addEventListener("click", () => openJobsHealthFindings(`All ${getReviewDashboardLabel()}`, state.rows));
+  }
+}
+
+function openJobsHealthFindings(title, rows) {
+  state.alerts = {
+    groupTitle: title,
+    category: "jobs_health",
+    rows,
+    columns: getJobsHealthColumns(rows),
+    error: "",
+  };
+  openAlertsPanel();
+}
+
+function getJobsHealthColumns(rows) {
+  const orderedColumns = [
+    "severity",
+    "health_area",
+    "check_name",
+    "job_name",
+    "job_status",
+    "owner_name",
+    "last_run_status",
+    "last_run_datetime",
+    "next_run_datetime",
+    "step_id",
+    "step_name",
+    "retry_attempts",
+    "detail",
+    "recommendation",
+  ];
+  const extraColumns = Array.from(new Set(rows.flatMap((row) => Object.keys(row)))).filter(
+    (column) => !orderedColumns.includes(column) && column !== "job_id"
+  );
+  return orderedColumns.filter((column) => rows.some((row) => Object.hasOwn(row, column))).concat(extraColumns);
+}
+
+async function runImpactAnalysis(searchText = state.impactSearchText) {
+  state.impactSearchText = String(searchText || "").trim();
+  els.message.classList.add("hidden");
+  els.tableTools.classList.add("hidden");
+  els.tableWrap.classList.add("hidden");
+  els.pagination.classList.add("hidden");
+  els.exportCsv.disabled = true;
+  els.cardView.classList.remove("hidden");
+
+  if (!state.impactSearchText) {
+    state.columns = [];
+    state.rows = [];
+    state.impactSummary = null;
+    els.rowCount.textContent = "0";
+    els.columnCount.textContent = "0";
+    els.cardView.innerHTML = renderImpactAnalysisView();
+    bindImpactAnalysisControls();
+    return;
+  }
+
+  els.cardView.innerHTML = renderImpactLoading(state.impactSearchText);
+  const payload = await api("/api/impact-analysis", {
+    method: "POST",
+    body: JSON.stringify({
+      connection: getQueryConnection(),
+      agentConnection: shouldUseAgentConnection() ? getQueryConnection(true) : null,
+      searchText: state.impactSearchText,
+    }),
+  });
+  const resultSet = payload.resultSets?.[0] || { columns: [], rows: [] };
+  state.columns = resultSet.columns || [];
+  state.rows = resultSet.rows || [];
+  state.impactSummary = payload.summary || null;
+  els.rowCount.textContent = String(state.rows.length);
+  els.columnCount.textContent = String(state.columns.length);
+  els.exportCsv.disabled = state.rows.length === 0;
+  els.cardView.innerHTML = renderImpactAnalysisView();
+  bindImpactAnalysisControls();
+  clearMessage(els.message);
+}
+
+function renderImpactLoading(searchText) {
+  return `
+    <section class="process-map process-map-loading">
+      <div class="loading-state">
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <div>
+          <strong>Analyzing ${escapeHtml(searchText)}</strong>
+          <span>Checking dependencies, table features, and related jobs.</span>
+        </div>
+        <div class="loading-bar" aria-hidden="true"><span></span></div>
+      </div>
+    </section>
+  `;
+}
+
+function renderImpactAnalysisView() {
+  const summary = state.impactSummary || {
+    risk: "Unknown",
+    direct_count: 0,
+    indirect_count: 0,
+    job_count: 0,
+    feature_count: 0,
+    confidence: "Low",
+    reason: "Search for a table, column, procedure, view, or function to analyze impact.",
+    suggested_action: "Enter an object name such as dbo.Customer or dbo.Customer.Email.",
+  };
+  const sections = groupImpactRows(state.rows || []);
+  return `
+    <section class="impact-analysis">
+      <div class="impact-search-panel">
+        <div>
+          <span class="map-kicker">Before-change risk</span>
+          <h3>Impact Analysis</h3>
+          <p>Search an object or column to see what could break before changing it.</p>
+        </div>
+        <form class="impact-search-form" data-impact-search-form>
+          <label>
+            <span>Object</span>
+            <input data-impact-search-input value="${escapeHtml(state.impactSearchText)}" placeholder="schema.object or schema.object.column" />
+          </label>
+          <button class="process-picker-go" type="submit">Analyze</button>
+        </form>
+      </div>
+      <div class="impact-summary impact-${escapeHtml(String(summary.risk || "unknown").toLowerCase())}">
+        <div>
+          <span class="health-eyebrow">Risk</span>
+          <strong>${escapeHtml(summary.risk || "Unknown")}</strong>
+          <p>${escapeHtml(summary.reason || "")}</p>
+        </div>
+        <div class="impact-metrics">
+          ${renderImpactMetric("Direct", summary.direct_count)}
+          ${renderImpactMetric("Indirect", summary.indirect_count)}
+          ${renderImpactMetric("Jobs", summary.job_count)}
+          ${renderImpactMetric("Features", summary.feature_count)}
+          ${renderImpactMetric("Confidence", summary.confidence)}
+        </div>
+      </div>
+      <div class="impact-action-note">
+        <strong>Suggested action</strong>
+        <span>${escapeHtml(summary.suggested_action || "Review affected objects before making the change.")}</span>
+      </div>
+      ${state.impactSearchText ? renderImpactSections(sections) : ""}
+    </section>
+  `;
+}
+
+function renderImpactMetric(label, value) {
+  return `
+    <span>
+      <strong>${escapeHtml(value ?? 0)}</strong>
+      ${escapeHtml(label)}
+    </span>
+  `;
+}
+
+function groupImpactRows(rows) {
+  return rows.reduce((groups, row) => {
+    const section = String(row.impact_section || "Other");
+    if (!groups[section]) groups[section] = [];
+    groups[section].push(row);
+    return groups;
+  }, {});
+}
+
+function renderImpactSections(sections) {
+  const order = ["Object dependency", "Table feature", "Jobs"];
+  const dynamic = Object.keys(sections).filter((section) => !order.includes(section));
+  const names = [...order, ...dynamic].filter((section) => sections[section]?.length);
+  if (!names.length) {
+    return `<div class="process-map-empty"><strong>No visible impact found.</strong><span>Metadata can still be incomplete because of permissions, dynamic SQL, or external callers.</span></div>`;
+  }
+  return names
+    .map((name) => `
+      <details class="impact-section" open>
+        <summary>
+          <span class="node-caret" aria-hidden="true">›</span>
+          <strong>${escapeHtml(name)} (${escapeHtml(sections[name].length)})</strong>
+        </summary>
+        ${renderImpactRows(sections[name])}
+      </details>
+    `)
+    .join("");
+}
+
+function renderImpactRows(rows) {
+  return `
+    <div class="impact-row-list">
+      ${rows.map((row) => renderImpactRow(row)).join("")}
+    </div>
+  `;
+}
+
+function renderImpactRow(row) {
+  const affectedName = [row.affected_schema, row.affected_object].filter(Boolean).join(".") || "-";
+  const referencedName = [row.referenced_schema, row.referenced_object].filter(Boolean).join(".") || "-";
+  const confidence = String(row.confidence || "Low");
+  const codeFragment = String(row.code_fragment || "").trim();
+  return `
+    <article class="impact-row impact-${escapeHtml(confidence.toLowerCase())}">
+      <div class="impact-row-main">
+        <span class="impact-direction">${escapeHtml(row.impact_direction || "Impact")}${row.impact_depth ? ` · depth ${escapeHtml(row.impact_depth)}` : ""}</span>
+        <strong>${escapeHtml(affectedName)}</strong>
+        <span>${escapeHtml(row.affected_type || "-")}</span>
+      </div>
+      <div class="impact-row-detail">
+        <span><strong>Reference</strong>${escapeHtml(referencedName)}${row.referenced_column ? `.${escapeHtml(row.referenced_column)}` : ""}</span>
+        <span><strong>Evidence</strong>${escapeHtml(row.evidence || "-")}</span>
+        <span><strong>Risk signal</strong>${escapeHtml(row.risk_signal || "-")}</span>
+      </div>
+      ${codeFragment ? renderImpactCodeFragment(codeFragment) : ""}
+      <span class="confidence-pill">Confidence: ${escapeHtml(confidence)}</span>
+    </article>
+  `;
+}
+
+function renderImpactCodeFragment(codeFragment) {
+  return `
+    <details class="impact-code">
+      <summary>Code fragment</summary>
+      <pre><code>${escapeHtml(codeFragment)}</code></pre>
+    </details>
+  `;
+}
+
+function bindImpactAnalysisControls() {
+  const form = els.cardView.querySelector("[data-impact-search-form]");
+  const input = els.cardView.querySelector("[data-impact-search-input]");
+  if (!form || !input) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runImpactAnalysis(input.value);
+  });
 }
 
 function resetWorkspace() {
@@ -2648,6 +3094,10 @@ function getDefaultFilterColumn() {
     live_active_waits: ["session_id", "database_name", "wait_type", "login_name"],
     live_tempdb_usage: ["session_id", "database_name", "login_name", "program_name"],
     live_log_usage: ["database_name", "pressure_level"],
+    jobs_health_dashboard: ["health_area", "check_name", "job_name", "severity"],
+    index_health_dashboard: ["health_area", "check_name", "subject_name", "severity"],
+    storage_datafiles_health: ["health_area", "check_name", "subject_name", "severity"],
+    waits_tempdb_review: ["health_area", "check_name", "subject_name", "severity"],
   };
   const candidates = preferredByQuery[state.activeQuery?.name] || [];
   return candidates.find((column) => state.columns.includes(column)) || inferNameColumn();
@@ -2757,12 +3207,12 @@ async function openCodeDetail(row) {
   }
 }
 
-async function openProcessDetail(row) {
-  const processName = row.process_name;
+async function openProcessDetail(row, initialTab = "overview") {
+  const processName = row.process_name || row.job_name;
   if (!processName || !state.connection) return;
 
   els.processDetailTitle.textContent = processName;
-  setActiveProcessDetailTab("overview");
+  setActiveProcessDetailTab(initialTab);
   els.processDetailBody.innerHTML = `
     <div class="detail-loading">
       <div class="loading-spinner" aria-hidden="true"></div>
@@ -2807,7 +3257,7 @@ async function openProcessDetail(row) {
       jobId: row.job_id || "",
     };
     els.processDetailDialog.dataset.detail = JSON.stringify(detail);
-    renderProcessDetailTab("overview");
+    renderProcessDetailTab(initialTab);
   } catch (error) {
     els.processDetailBody.innerHTML = `<div class="alert-error">${escapeHtml(error.message)}</div>`;
   }

@@ -1,6 +1,6 @@
 # SQLSidekick - Plan de trabajo
 
-Fecha de actualizacion: 2026-05-22
+Fecha de actualizacion: 2026-05-23
 
 ## Vision
 
@@ -17,7 +17,7 @@ El foco del producto es explicar:
 
 ## Estado actual
 
-La app ya cuenta con una base funcional para documentacion y lineage online.
+La app ya cuenta con una base funcional para documentacion, lineage online, diagnostico Live y Health basico.
 
 Componentes principales:
 
@@ -31,13 +31,15 @@ Componentes principales:
 Modulos actuales:
 
 - **Documentation**: servidor, database, storage, structure, constraints, SQL code, security y SQL Agent jobs.
-- **Processes**: inventario de procesos, steps, SQL objects, recent runs y lineage maps.
-- **Lineage**: consultas tabulares de dependencias.
-- **Health**: alertas basicas por categoria.
+- **Processes**: lineage maps visuales para Jobs, Procedures, Views y Functions.
+- **Live**: dashboard/checks online para actividad actual, bloqueos, waits, TempDB y log.
+- **Operations > Review**: Health dashboard, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review e Impact Analysis.
 
 ## Estado funcional por modulo
 
 ### Documentation
+
+Estado: listo como primera etapa de documentacion basica.
 
 Incluye inventario de:
 
@@ -57,14 +59,10 @@ Tambien incluye detalles para:
 
 ### Processes
 
-El modulo Processes queda como vista estable para procesos operativos:
+Estado: Jobs/Lineage basico listo.
 
-- **Inventory**: procesos detectados desde SQL Agent jobs.
-- **Steps**: steps del job.
-- **SQL Objects**: objetos SQL llamados desde steps T-SQL.
-- **Recent Runs**: ejecuciones recientes.
-- **Process Detail**: popup con tabs `Overview`, `Steps`, `SQL Objects` y `Recent Runs`.
-- **Lineage maps**:
+El modulo Processes queda enfocado en mapas visuales:
+
   - Jobs.
   - Procedures.
   - Views.
@@ -84,19 +82,57 @@ Incluyen:
 - detalles por nodo,
 - fragmentos de codigo,
 - direccion inversa para tablas dentro del mapa,
-- persistencia de ultima seleccion por tipo de mapa en el navegador.
+  - persistencia de ultima seleccion por tipo de mapa en el navegador.
+
+La documentacion tabular de SQL Agent queda dentro de **Documentation > Jobs**:
+
+- SQL Agent jobs.
+- SQL Agent job steps.
+- SQL Agent job schedules.
+- SQL Agent job history.
+
+### Live
+
+Estado: Live dashboard/checks listo como primera version online.
+
+El modulo Live permite revisar rapidamente actividad actual sin persistencia:
+
+- **Live dashboard** con semaforo, presion, actividad y resource pressure.
+- **Current requests**.
+- **Top active sessions**.
+- **Blocking now**.
+- **Root blockers**.
+- **Active waits**.
+- **TempDB usage by session**.
+- **Transaction log usage**.
+
+El dashboard permite navegar desde cada KPI al detalle correspondiente.
+
+Settings incluye auto-refresh opcional para refrescar la consulta Live activa cada X segundos.
 
 ### Health
 
-Existen alertas basicas para categorias principales, incluyendo procesos/jobs.
+Estado: Operations > Review listo hasta Impact Analysis MVP.
 
-Ejemplos:
+Incluye:
+
+- **Health dashboard**: estado general por categoria usando alertas basicas existentes.
+- Cards clicables para ver alertas por categoria.
+- Totales por severidad clicables.
+- Boton para ver todas las alertas.
+- **Jobs Health**: dashboard accionable enfocado en SQL Agent jobs.
+- **Index Health**: revision online de missing indexes, indices no usados, heaps, indices deshabilitados e hipoteticos.
+- **Storage / Datafiles Health**: revision online de uso de archivos, autogrowth, log usage y layout.
+- **Waits / TempDB Review**: revision online de bloqueos, waits, requests largos, TempDB y log pressure.
+- **Impact Analysis**: analisis online de riesgo antes de cambiar tablas, columnas, procedures, views o functions.
+
+Jobs Health revisa:
 
 - jobs deshabilitados,
-- ultimo run fallido,
-- jobs sin schedule,
-- jobs que no corren hace X dias,
-- retries altos,
+- jobs fallidos recientes,
+- jobs sin schedule futuro activo,
+- jobs sin ejecucion reciente,
+- steps con retry alto,
 - owners sospechosos o inexistentes.
 
 ## Decisiones de producto actuales
@@ -112,6 +148,8 @@ Motivo:
 - pertenece mejor a una version mas enterprise.
 
 La version actual trabaja online: consulta SQL Server, renderiza resultados y no almacena historicos de analisis.
+
+Esto aplica tambien a Live y Health: no hay tablas locales de snapshots ni repositorio historico.
 
 ### SQL Server-first
 
@@ -134,8 +172,10 @@ Se muestran niveles de confianza y mensajes claros cuando SQL Server no puede re
 
 ### P0 - Estabilizacion actual
 
-- Probar Processes con jobs grandes y chicos.
-- Probar mapas para procedures, views y functions.
+- Probar Documentation completa en entornos con permisos distintos.
+- Probar Live dashboard/checks con y sin permisos de DMV.
+- Probar Health dashboard y Jobs Health con usuario principal y usuario dedicado de SQL Agent.
+- Probar Processes lineage maps con jobs grandes y chicos.
 - Revisar mensajes de error en entornos AWS RDS y permisos limitados.
 - Confirmar que `light` y `full` cargan todas las consultas esperadas.
 - Revisar nombres user friendly de columnas nuevas.
@@ -155,7 +195,7 @@ Objetivo:
 
 Responder que podria afectarse antes de cambiar un objeto.
 
-MVP:
+Estado: MVP inicial implementado.
 
 - Impact analysis por tabla.
 - Impact analysis por columna.
@@ -163,6 +203,13 @@ MVP:
 - Separar dependencias directas e indirectas.
 - Incluir jobs relacionados.
 - Incluir ultimo run / ultimo fallo cuando exista.
+
+Siguientes mejoras:
+
+- Mejorar deteccion read/write.
+- Integrar recomendaciones/fixes sugeridos desde findings de Health.
+- Marcar objetos externos o cross-database con mayor claridad.
+- Enlazar findings hacia detalles de Documentation y mapas de Processes.
 
 ### P3 - Query Store Intelligence
 
@@ -201,6 +248,8 @@ El MVP actual es valioso si responde:
 - Que triggers o columnas calculadas estan involucradas?
 - Que objetos usan una tabla dentro del mapa actual?
 - Que configuraciones basicas parecen riesgosas?
+- Que puede estar lento ahora mismo?
+- Que jobs requieren atencion primero?
 
 ## Riesgos
 
