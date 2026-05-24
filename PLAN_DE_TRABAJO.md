@@ -33,7 +33,7 @@ Modulos actuales:
 - **Documentation**: servidor, database, storage, structure, constraints, SQL code, security y SQL Agent jobs.
 - **Processes**: lineage maps visuales para Jobs, Procedures, Views y Functions.
 - **Live**: dashboard/checks online para actividad actual, bloqueos, waits, TempDB y log.
-- **Operations > Review**: Health dashboard, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review, Impact Analysis y Recommendations.
+- **Operations > Review**: Health dashboard, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review, Query Store Intelligence, Impact Analysis y Recommendations.
 
 ## Estado funcional por modulo
 
@@ -124,6 +124,7 @@ Incluye:
 - **Index Health**: revision online de missing indexes, indices no usados, heaps, indices deshabilitados e hipoteticos.
 - **Storage / Datafiles Health**: revision online de uso de archivos, autogrowth, log usage y layout.
 - **Waits / TempDB Review**: revision online de bloqueos, waits, requests largos, TempDB y log pressure.
+- **Query Store Intelligence**: revision online de estado de Query Store, top queries, regresiones, waits por query y diversidad de planes.
 - **Impact Analysis**: analisis online de riesgo antes de cambiar tablas, columnas, procedures, views o functions.
 - **Recommendations**: recomendaciones con evidencia, severidad, objeto afectado, SQL sugerido y notas de seguridad.
 
@@ -233,13 +234,29 @@ Objetivo:
 
 Detectar regresiones y explicarlas con contexto de procesos y lineage.
 
-MVP:
+Estado: MVP inicial implementado.
 
 - Top regressions por duracion, CPU, reads y writes.
 - Queries con cambio de plan.
 - Waits dominantes.
 - Relacion con objeto/proceso cuando sea posible.
 - Resumen humano de causa probable y siguiente accion.
+
+Implementado:
+
+- Query Store overview.
+- Top queries por duracion, CPU y lecturas.
+- Regresiones recientes contra baseline corta.
+- Wait categories por query.
+- Plan diversity / forced plan signals.
+- Recomendaciones basicas desde regresiones de Query Store.
+
+Siguientes mejoras:
+
+- Enlazar query text con objetos/procesos cuando el texto permita resolverlos.
+- Enlazar regresiones con lineage maps e Impact Analysis.
+- Agregar filtros por ventana de tiempo.
+- Separar queries parametrizadas por query hash / plan hash cuando aplique.
 
 ### P5 - Version enterprise / historico
 

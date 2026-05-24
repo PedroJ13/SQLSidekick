@@ -1899,6 +1899,71 @@ button:disabled {
   gap: 8px;
 }
 
+.query-store-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.query-store-signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.query-store-signal {
+  width: fit-content;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.query-store-signal.high {
+  border-color: rgba(167, 52, 52, .24);
+  background: rgba(167, 52, 52, .08);
+  color: var(--danger);
+}
+
+.query-store-signal.medium {
+  border-color: rgba(183, 121, 31, .28);
+  background: rgba(183, 121, 31, .10);
+  color: var(--warning);
+}
+
+.query-store-signal.low {
+  border-color: rgba(59, 130, 160, .24);
+  background: rgba(59, 130, 160, .08);
+  color: var(--brand);
+}
+
+.query-store-check-list {
+  display: grid;
+  gap: 8px;
+}
+
+.query-store-check {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.query-store-check strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.query-store-check span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .map-used-by {
   display: grid;
   gap: 8px;

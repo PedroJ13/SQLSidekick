@@ -9,7 +9,7 @@ La version actual se enfoca en:
 - Documentacion de Jobs basada en SQL Agent.
 - Lineage basico online para jobs, procedures, views y functions.
 - Live dashboard/checks para revisar actividad actual sin persistencia.
-- Operations Review con Health, Jobs/Index/Storage/Waits reviews, Impact Analysis y Recommendations.
+- Operations Review con Health, Jobs/Index/Storage/Waits reviews, Query Store Intelligence, Impact Analysis y Recommendations.
 - Impact Analysis online para revisar riesgo antes de cambiar objetos.
 - Mapas visuales de dependencias sin guardar snapshots ni historial local.
 
@@ -44,7 +44,7 @@ http://127.0.0.1:8765
 - **Documentation**: documentacion basica de objetos SQL Server.
 - **Processes**: mapas visuales de lineage para jobs, procedures, views y functions.
 - **Live**: diagnostico online de actividad actual, bloqueos, waits, TempDB y log.
-- **Operations > Review**: Health dashboard, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review, Impact Analysis y Recommendations.
+- **Operations > Review**: Health dashboard, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review, Query Store Intelligence, Impact Analysis y Recommendations.
 
 ## Processes
 
@@ -98,6 +98,7 @@ Dentro de **Operations > Review**, Health consolida alertas basicas y revisiones
 - **Index health**: missing indexes, indices no usados, heaps, indices deshabilitados o hipoteticos.
 - **Storage / Datafiles health**: uso de archivos, autogrowth, log usage y layout de datafiles.
 - **Waits / TempDB review**: bloqueos, waits activos, requests largos, uso de TempDB y presion del log.
+- **Query Store Intelligence**: estado de Query Store, top queries, regresiones, waits y diversidad de planes.
 - **Impact analysis**: riesgo antes de cambiar tablas, columnas, procedures, views o functions.
 - **Recommendations**: acciones recomendadas con evidencia, impacto, SQL sugerido y notas de seguridad.
 
@@ -139,6 +140,18 @@ Recommendations convierte findings online en acciones revisables:
 
 El SQL sugerido es una ayuda para revision. SQLSidekick no lo ejecuta automaticamente.
 
+## Query Store Intelligence
+
+Query Store Intelligence usa Query Store cuando esta habilitado en la base:
+
+- estado y uso de storage de Query Store,
+- queries con mayor duracion, CPU y lecturas,
+- regresiones recientes contra una linea base corta,
+- waits dominantes por query,
+- queries con multiples planes o plan forcing.
+
+Las consultas estan acotadas a ventanas recientes para mantener el analisis online. Si Query Store esta apagado o sin permisos, la app muestra el estado controlado en vez de instalar objetos o guardar snapshots.
+
 ## Seguridad
 
 Las credenciales se envian solo al servidor local de la app para abrir la conexion SQL Server. La app puede guardar en `localStorage` del navegador:
@@ -166,5 +179,4 @@ La app carga esas secciones y las ejecuta cuando eliges un modulo en la web. Exi
 - Snapshots historicos.
 - Comparacion entre ejecuciones.
 - Repositorio local de analisis.
-- Query Store Intelligence.
 - IA con contexto historico.

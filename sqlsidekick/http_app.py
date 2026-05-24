@@ -116,6 +116,9 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/recommendations":
             self.handle_recommendations()
             return
+        if parsed.path == "/api/query-store-detail":
+            self.handle_query_store_detail()
+            return
         self.send_json({"error": "Ruta no encontrada."}, status=404)
 
     def handle_run_query(self) -> None:
@@ -303,6 +306,7 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
                 ("Index", "index_health_dashboard", primary_settings),
                 ("Storage", "storage_datafiles_health", primary_settings),
                 ("Waits / TempDB", "waits_tempdb_review", primary_settings),
+                ("Query Store", "query_store_regressions", primary_settings),
             ]
             for source_area, query_name, settings in sources:
                 if settings is None:
@@ -342,6 +346,81 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
                 "safety_notes",
             ]
             self.send_json({"ok": True, "resultSets": [{"columns": columns, "rows": rows}]})
+        except SQLServerError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": f"Error inesperado: {exc}"}, status=500)
+
+    def handle_query_store_detail(self) -> None:
+        payload = self.read_json()
+        query_id_raw = payload.get("queryId")
+        try:
+            query_id = int(query_id_raw)
+        except (TypeError, ValueError):
+            self.send_json({"error": "Query ID is required."}, status=400)
+            return
+
+        try:
+            primary_settings = ConnectionSettings.from_payload(payload.get("connection", payload))
+            overview = execute_query(primary_settings, query_store_query_overview_sql(query_id)).get("resultSets", [{}])[0]
+            runtime = execute_query(primary_settings, query_store_query_runtime_sql(query_id)).get("resultSets", [{}])[0]
+            plans = execute_query(primary_settings, query_store_query_plans_sql(query_id)).get("resultSets", [{}])[0]
+            waits = execute_query(primary_settings, query_store_query_waits_sql(query_id)).get("resultSets", [{}])[0]
+
+            overview_row = (overview.get("rows") or [{}])[0]
+            object_schema = overview_row.get("object_schema")
+            object_name = overview_row.get("object_name")
+            related_rows: list[dict[str, Any]] = []
+            related_columns = [
+                "process_name",
+                "step_order",
+                "step_name",
+                "database_name",
+                "relationship",
+                "confidence",
+                "command_preview",
+            ]
+
+            agent_payload = payload.get("agentConnection")
+            if agent_payload and object_name:
+                try:
+                    queries = load_named_queries(self.queries_path, version="full")
+                    agent_settings = ConnectionSettings.from_payload(agent_payload)
+                    process_objects = execute_query(agent_settings, queries["process_sql_objects"].sql)
+                    process_rows = process_objects.get("resultSets", [{}])[0].get("rows", [])
+                    related_rows = query_store_related_process_rows(object_schema, object_name, process_rows)
+                    lineage = execute_query(primary_settings, lineage_from_process_objects_sql("process_lineage", process_rows))
+                    lineage_rows = lineage.get("resultSets", [{}])[0].get("rows", [])
+                    related_rows = merge_related_process_rows(
+                        related_rows,
+                        query_store_related_lineage_rows(object_schema, object_name, lineage_rows),
+                    )
+                except Exception as exc:
+                    related_rows = [
+                        {
+                            "process_name": "SQL Agent metadata unavailable",
+                            "step_order": None,
+                            "step_name": None,
+                            "database_name": None,
+                            "relationship": str(exc),
+                            "confidence": "Low",
+                            "command_preview": None,
+                        }
+                    ]
+
+            self.send_json(
+                {
+                    "ok": True,
+                    "queryId": query_id,
+                    "resultSets": [
+                        overview,
+                        runtime,
+                        plans,
+                        waits,
+                        {"columns": related_columns, "rows": related_rows},
+                    ],
+                }
+            )
         except SQLServerError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
@@ -1113,14 +1192,24 @@ def build_recommendation_row(source_area: str, finding: dict[str, Any]) -> dict[
     severity = str(finding.get("severity") or "LOW").upper()
     health_area = str(finding.get("health_area") or source_area)
     check_name = str(finding.get("check_name") or "Review finding")
+    if source_area == "Query Store":
+        health_area = "Regressions"
+        check_name = "Query duration regression detected"
     affected_object = str(
         finding.get("job_name")
         or finding.get("subject_name")
         or finding.get("object_name")
+        or (f"Query {finding.get('query_id')}" if finding.get("query_id") else "")
         or finding.get("database_name")
         or "-"
     )
     detail = str(finding.get("detail") or finding.get("recommendation") or "-")
+    if source_area == "Query Store":
+        detail = (
+            f"Recent avg duration: {finding.get('recent_avg_duration_ms') or '-'} ms; "
+            f"baseline avg duration: {finding.get('baseline_avg_duration_ms') or '-'} ms; "
+            f"regression ratio: {finding.get('regression_ratio') or '-'}."
+        )
     suggested_sql = recommendation_sql(source_area, finding)
     if not suggested_sql:
         suggested_sql = "-- No safe generic SQL is available for this finding.\n-- Review the evidence and validate the change manually."
@@ -1131,10 +1220,232 @@ def build_recommendation_row(source_area: str, finding: dict[str, Any]) -> dict[
         "affected_object": affected_object,
         "evidence": detail,
         "impact_hint": recommendation_impact_hint(source_area),
-        "recommended_action": str(finding.get("recommendation") or default_recommended_action(source_area)),
+        "recommended_action": default_recommended_action(source_area) if source_area == "Query Store" else str(finding.get("recommendation") or default_recommended_action(source_area)),
         "suggested_sql": suggested_sql,
         "safety_notes": recommendation_safety_notes(source_area, suggested_sql),
     }
+
+
+def query_store_query_overview_sql(query_id: int) -> str:
+    return f"""
+BEGIN TRY
+    SELECT TOP (1)
+        q.query_id,
+        q.object_id,
+        SCHEMA_NAME(o.schema_id) AS object_schema,
+        o.name AS object_name,
+        o.type_desc AS object_type,
+        q.is_internal_query,
+        CONVERT(varchar(16), q.last_compile_start_time, 120) AS last_compile_start_time,
+        CONVERT(varchar(16), q.last_execution_time, 120) AS last_execution_time,
+        qt.query_sql_text
+    FROM sys.query_store_query AS q
+    INNER JOIN sys.query_store_query_text AS qt
+        ON qt.query_text_id = q.query_text_id
+    LEFT JOIN sys.objects AS o
+        ON o.object_id = NULLIF(q.object_id, 0)
+    WHERE q.query_id = {int(query_id)};
+END TRY
+BEGIN CATCH
+    SELECT
+        CAST({int(query_id)} AS bigint) AS query_id,
+        CAST(NULL AS int) AS object_id,
+        CAST(NULL AS sysname) AS object_schema,
+        CAST(NULL AS sysname) AS object_name,
+        CAST(NULL AS nvarchar(60)) AS object_type,
+        CAST(NULL AS bit) AS is_internal_query,
+        CAST(NULL AS varchar(16)) AS last_compile_start_time,
+        CAST(NULL AS varchar(16)) AS last_execution_time,
+        ERROR_MESSAGE() AS query_sql_text;
+END CATCH;
+"""
+
+
+def query_store_query_runtime_sql(query_id: int) -> str:
+    return f"""
+BEGIN TRY
+    WITH numbered_intervals AS (
+        SELECT
+            runtime_stats_interval_id,
+            ROW_NUMBER() OVER (ORDER BY end_time DESC) AS rn
+        FROM sys.query_store_runtime_stats_interval
+    ),
+    windows AS (
+        SELECT
+            CASE WHEN ni.rn = 1 THEN 'Recent' ELSE 'Baseline' END AS runtime_window,
+            SUM(rs.count_executions) AS execution_count,
+            SUM(rs.avg_duration * rs.count_executions) AS weighted_duration,
+            SUM(rs.avg_cpu_time * rs.count_executions) AS weighted_cpu,
+            SUM(rs.avg_logical_io_reads * rs.count_executions) AS weighted_logical_reads,
+            SUM(rs.avg_physical_io_reads * rs.count_executions) AS weighted_physical_reads,
+            CONVERT(varchar(16), MIN(rsi.start_time), 120) AS window_start,
+            CONVERT(varchar(16), MAX(rsi.end_time), 120) AS window_end
+        FROM sys.query_store_runtime_stats AS rs
+        INNER JOIN numbered_intervals AS ni
+            ON ni.runtime_stats_interval_id = rs.runtime_stats_interval_id
+        INNER JOIN sys.query_store_runtime_stats_interval AS rsi
+            ON rsi.runtime_stats_interval_id = rs.runtime_stats_interval_id
+        INNER JOIN sys.query_store_plan AS p
+            ON p.plan_id = rs.plan_id
+        WHERE p.query_id = {int(query_id)}
+          AND ni.rn <= 8
+        GROUP BY CASE WHEN ni.rn = 1 THEN 'Recent' ELSE 'Baseline' END
+    )
+    SELECT
+        runtime_window,
+        execution_count,
+        CONVERT(decimal(19,2), weighted_duration / NULLIF(execution_count, 0) / 1000.0) AS avg_duration_ms,
+        CONVERT(decimal(19,2), weighted_cpu / NULLIF(execution_count, 0) / 1000.0) AS avg_cpu_ms,
+        CONVERT(decimal(19,2), weighted_logical_reads / NULLIF(execution_count, 0)) AS avg_logical_reads,
+        CONVERT(decimal(19,2), weighted_physical_reads / NULLIF(execution_count, 0)) AS avg_physical_reads,
+        window_start,
+        window_end
+    FROM windows
+    ORDER BY CASE runtime_window WHEN 'Recent' THEN 1 ELSE 2 END;
+END TRY
+BEGIN CATCH
+    SELECT
+        'Unavailable' AS runtime_window,
+        CAST(NULL AS bigint) AS execution_count,
+        CAST(NULL AS decimal(19,2)) AS avg_duration_ms,
+        CAST(NULL AS decimal(19,2)) AS avg_cpu_ms,
+        CAST(NULL AS decimal(19,2)) AS avg_logical_reads,
+        CAST(NULL AS decimal(19,2)) AS avg_physical_reads,
+        CAST(NULL AS varchar(16)) AS window_start,
+        ERROR_MESSAGE() AS window_end;
+END CATCH;
+"""
+
+
+def query_store_query_plans_sql(query_id: int) -> str:
+    return f"""
+BEGIN TRY
+    SELECT
+        p.plan_id,
+        p.is_forced_plan,
+        p.force_failure_count,
+        p.last_force_failure_reason_desc,
+        p.count_compiles,
+        CONVERT(decimal(19,2), p.avg_compile_duration / 1000.0) AS avg_compile_duration_ms,
+        CONVERT(varchar(16), p.last_execution_time, 120) AS last_execution_time,
+        CASE
+            WHEN p.force_failure_count > 0 THEN 'Forced plan failed'
+            WHEN p.is_forced_plan = 1 THEN 'Forced plan'
+            ELSE 'Observed plan'
+        END AS plan_signal,
+        LEFT(CONVERT(nvarchar(max), p.query_plan), 4000) AS plan_preview
+    FROM sys.query_store_plan AS p
+    WHERE p.query_id = {int(query_id)}
+    ORDER BY
+        p.force_failure_count DESC,
+        p.is_forced_plan DESC,
+        p.last_execution_time DESC;
+END TRY
+BEGIN CATCH
+    SELECT
+        CAST(NULL AS bigint) AS plan_id,
+        CAST(NULL AS bit) AS is_forced_plan,
+        CAST(NULL AS bigint) AS force_failure_count,
+        CAST(NULL AS nvarchar(120)) AS last_force_failure_reason_desc,
+        CAST(NULL AS bigint) AS count_compiles,
+        CAST(NULL AS decimal(19,2)) AS avg_compile_duration_ms,
+        CAST(NULL AS varchar(16)) AS last_execution_time,
+        'Unavailable' AS plan_signal,
+        ERROR_MESSAGE() AS plan_preview;
+END CATCH;
+"""
+
+
+def query_store_query_waits_sql(query_id: int) -> str:
+    return f"""
+BEGIN TRY
+    WITH latest_intervals AS (
+        SELECT TOP (12) runtime_stats_interval_id
+        FROM sys.query_store_runtime_stats_interval
+        ORDER BY end_time DESC
+    )
+    SELECT TOP (12)
+        ws.wait_category_desc AS wait_category,
+        CONVERT(decimal(19,2), SUM(ws.total_query_wait_time_ms)) AS total_wait_ms,
+        CONVERT(decimal(19,2), AVG(ws.avg_query_wait_time_ms)) AS avg_wait_ms,
+        CONVERT(varchar(16), MAX(rsi.end_time), 120) AS last_seen
+    FROM sys.query_store_wait_stats AS ws
+    INNER JOIN latest_intervals AS li
+        ON li.runtime_stats_interval_id = ws.runtime_stats_interval_id
+    INNER JOIN sys.query_store_runtime_stats_interval AS rsi
+        ON rsi.runtime_stats_interval_id = ws.runtime_stats_interval_id
+    INNER JOIN sys.query_store_plan AS p
+        ON p.plan_id = ws.plan_id
+    WHERE p.query_id = {int(query_id)}
+    GROUP BY ws.wait_category_desc
+    ORDER BY total_wait_ms DESC;
+END TRY
+BEGIN CATCH
+    SELECT
+        'Unavailable' AS wait_category,
+        CAST(NULL AS decimal(19,2)) AS total_wait_ms,
+        CAST(NULL AS decimal(19,2)) AS avg_wait_ms,
+        ERROR_MESSAGE() AS last_seen;
+END CATCH;
+"""
+
+
+def query_store_related_process_rows(object_schema: Any, object_name: Any, process_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    target_key = object_key(object_schema, object_name)
+    rows_by_key: dict[str, dict[str, Any]] = {}
+    for row in process_rows:
+        row_key = object_key(row.get("schema_name") or row.get("called_schema"), row.get("object_name") or row.get("called_object_name"))
+        if row_key != target_key:
+            continue
+        process_name = row.get("process_name")
+        if not process_name:
+            continue
+        key = f"{process_name}|{row.get('step_order') or row.get('step_id')}|{row_key}"
+        rows_by_key[key] = {
+            "process_name": process_name,
+            "step_order": row.get("step_order") or row.get("step_id"),
+            "step_name": row.get("step_name"),
+            "database_name": row.get("database_name"),
+            "relationship": "Job step calls this Query Store object",
+            "confidence": row.get("confidence") or "Medium",
+            "command_preview": row.get("command_preview"),
+        }
+    return list(rows_by_key.values())
+
+
+def query_store_related_lineage_rows(object_schema: Any, object_name: Any, lineage_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    target_key = object_key(object_schema, object_name)
+    rows_by_key: dict[str, dict[str, Any]] = {}
+    for row in lineage_rows:
+        called_key = object_key(row.get("called_schema"), row.get("called_object_name"))
+        referenced_key = object_key(row.get("referenced_schema"), row.get("referenced_object"))
+        if target_key not in {called_key, referenced_key}:
+            continue
+        process_name = row.get("process_name")
+        if not process_name:
+            continue
+        key = f"{process_name}|{row.get('step_order')}|{called_key}|{referenced_key}"
+        rows_by_key[key] = {
+            "process_name": process_name,
+            "step_order": row.get("step_order"),
+            "step_name": row.get("step_name"),
+            "database_name": row.get("database_name"),
+            "relationship": "Lineage references this Query Store object",
+            "confidence": row.get("confidence") or "Medium",
+            "command_preview": row.get("command_preview"),
+        }
+    return list(rows_by_key.values())
+
+
+def merge_related_process_rows(*row_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows_by_key: dict[str, dict[str, Any]] = {}
+    for rows in row_groups:
+        for row in rows:
+            key = f"{row.get('process_name')}|{row.get('step_order')}|{row.get('relationship')}"
+            existing = rows_by_key.get(key)
+            if not existing or confidence_rank(row.get("confidence")) < confidence_rank(existing.get("confidence")):
+                rows_by_key[key] = row
+    return list(rows_by_key.values())
 
 
 def recommendation_sql(source_area: str, finding: dict[str, Any]) -> str:
@@ -1219,6 +1530,21 @@ def recommendation_sql(source_area: str, finding: dict[str, Any]) -> str:
             )
         return "SELECT session_id, status, wait_type, wait_time, blocking_session_id FROM sys.dm_exec_requests WHERE session_id <> @@SPID;"
 
+    if source_area == "Query Store":
+        query_id = finding.get("query_id")
+        return (
+            "SELECT\n"
+            "    q.query_id,\n"
+            "    p.plan_id,\n"
+            "    p.is_forced_plan,\n"
+            "    p.last_execution_time,\n"
+            "    qt.query_sql_text\n"
+            "FROM sys.query_store_query AS q\n"
+            "INNER JOIN sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id\n"
+            "INNER JOIN sys.query_store_plan AS p ON p.query_id = q.query_id\n"
+            f"WHERE q.query_id = {int(query_id)};"
+        ) if query_id is not None else ""
+
     return ""
 
 
@@ -1228,11 +1554,17 @@ def recommendation_impact_hint(source_area: str) -> str:
         "Index": "Index changes can improve reads but may add write overhead, blocking, or maintenance cost.",
         "Storage": "Storage changes can affect growth behavior, disk pressure, and transaction log availability.",
         "Waits / TempDB": "Current activity can affect users now; review live sessions before acting.",
+        "Query Store": "Recent performance changed compared with its Query Store baseline.",
     }
     return hints.get(source_area, "Review impact before applying changes.")
 
 
 def default_recommended_action(source_area: str) -> str:
+    if source_area == "Query Store":
+        return (
+            "Review plan changes, statistics freshness, related indexes, parameter sensitivity, "
+            "and current blocking/waits before forcing plans or changing schema."
+        )
     return f"Review the {source_area} finding and validate impact before changing SQL Server."
 
 
@@ -1244,6 +1576,7 @@ def recommendation_safety_notes(source_area: str, suggested_sql: str) -> str:
         "Jobs": "Validate owner, schedule, and failing step first. Suggested SQL is diagnostic or administrative.",
         "Storage": "Replace placeholders, confirm disk capacity, and avoid growth changes during peak load.",
         "Waits / TempDB": "Diagnostic SQL only. Do not kill sessions without confirming business impact.",
+        "Query Store": "Diagnostic SQL only. Validate plans, workload window, and business timing before forcing or changing anything.",
     }
     return notes.get(source_area, "Suggested SQL is a starting point, not an automatic fix.")
 

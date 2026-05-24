@@ -86,6 +86,16 @@ const HEALTH_GROUPS = [
     title: "Recommendations",
     names: ["recommendations"],
   },
+  {
+    title: "Query Store",
+    names: [
+      "query_store_overview",
+      "query_store_top_queries",
+      "query_store_regressions",
+      "query_store_waits",
+      "query_store_plans",
+    ],
+  },
 ];
 
 const NAV_AREAS = [
@@ -197,6 +207,20 @@ const CARD_GROUPS = {
     {
       title: "Security",
       fields: ["database_user_count", "custom_role_count", "server_login_count"],
+    },
+  ],
+  query_store_overview: [
+    {
+      title: "Status",
+      fields: ["query_store_state", "desired_state", "actual_state", "readonly_reason", "capture_mode"],
+    },
+    {
+      title: "Storage",
+      fields: ["current_storage_mb", "max_storage_mb", "storage_used_percent", "stale_query_threshold_days"],
+    },
+    {
+      title: "Workload",
+      fields: ["tracked_queries", "tracked_plans", "last_interval_start", "last_interval_end"],
     },
   ],
   database_properties: [
@@ -1863,7 +1887,7 @@ function renderRecommendationsView(rows) {
     groups[category].push(row);
     return groups;
   }, {});
-  const categories = ["Jobs", "Index", "Storage", "Waits / TempDB", "Access", "Other"].filter((category) => grouped[category]?.length);
+  const categories = ["Jobs", "Index", "Storage", "Waits / TempDB", "Query Store", "Access", "Other"].filter((category) => grouped[category]?.length);
   const highCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "high").length;
   const mediumCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "medium").length;
   const lowCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "low").length;
@@ -3208,6 +3232,8 @@ function renderTable() {
           openCodeDetail(row);
         } else if (isProcessInventoryQuery()) {
           openProcessDetail(row);
+        } else if (isQueryStoreQuery()) {
+          openQueryStoreDetail(row);
         }
       });
       actionTd.appendChild(button);
@@ -3278,6 +3304,10 @@ function getDefaultFilterColumn() {
     index_health_dashboard: ["health_area", "check_name", "subject_name", "severity"],
     storage_datafiles_health: ["health_area", "check_name", "subject_name", "severity"],
     waits_tempdb_review: ["health_area", "check_name", "subject_name", "severity"],
+    query_store_top_queries: ["query_text_preview", "total_duration_ms", "execution_count"],
+    query_store_regressions: ["query_text_preview", "recent_avg_duration_ms", "baseline_avg_duration_ms", "regression_ratio"],
+    query_store_waits: ["query_text_preview", "wait_category", "total_wait_ms"],
+    query_store_plans: ["query_text_preview", "plan_count", "forced_plan_count"],
   };
   const candidates = preferredByQuery[state.activeQuery?.name] || [];
   return candidates.find((column) => state.columns.includes(column)) || inferNameColumn();
@@ -3309,14 +3339,24 @@ function isProcessInventoryQuery() {
   return state.activeQuery?.name === "process_inventory";
 }
 
+function isQueryStoreQuery() {
+  return [
+    "query_store_top_queries",
+    "query_store_regressions",
+    "query_store_waits",
+    "query_store_plans",
+  ].includes(state.activeQuery?.name);
+}
+
 function hasRowDetail() {
-  return isTablesQuery() || isCodeQuery() || isProcessInventoryQuery();
+  return isTablesQuery() || isCodeQuery() || isProcessInventoryQuery() || isQueryStoreQuery();
 }
 
 function getRowDetailTitle() {
   if (isTablesQuery()) return "Open table detail";
   if (isCodeQuery()) return "Open SQL code detail";
   if (isProcessInventoryQuery()) return "Open process detail";
+  if (isQueryStoreQuery()) return "Open Query Store detail";
   return "Open detail";
 }
 
@@ -3474,6 +3514,189 @@ async function openProcessStepSqlObjects(row) {
   } catch (error) {
     els.stepObjectsBody.innerHTML = `<div class="alert-error">${escapeHtml(error.message)}</div>`;
   }
+}
+
+async function openQueryStoreDetail(row) {
+  const queryId = row.query_id;
+  if (!queryId || !state.connection || !els.mapDetailDialog) return;
+
+  els.mapDetailTitle.textContent = `Query ${queryId}`;
+  els.mapDetailBody.innerHTML = `
+    <div class="detail-loading">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <span>Loading Query Store detail</span>
+    </div>
+  `;
+  els.mapDetailDialog.showModal();
+
+  try {
+    const payload = await api("/api/query-store-detail", {
+      method: "POST",
+      body: JSON.stringify({
+        connection: state.connection,
+        agentConnection: shouldUseAgentConnection() ? getQueryConnection(true) : null,
+        queryId,
+      }),
+    });
+    els.mapDetailBody.innerHTML = renderQueryStoreDetail(payload);
+    bindQueryStoreDetailControls(payload);
+  } catch (error) {
+    els.mapDetailBody.innerHTML = `<div class="alert-error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderQueryStoreDetail(payload) {
+  const overviewSet = payload.resultSets?.[0] || { columns: [], rows: [] };
+  const runtimeSet = payload.resultSets?.[1] || { columns: [], rows: [] };
+  const plansSet = payload.resultSets?.[2] || { columns: [], rows: [] };
+  const waitsSet = payload.resultSets?.[3] || { columns: [], rows: [] };
+  const processesSet = payload.resultSets?.[4] || { columns: [], rows: [] };
+  const overview = overviewSet.rows?.[0] || {};
+  const objectName = overview.object_name ? `${overview.object_schema || "dbo"}.${overview.object_name}` : "Not resolved to module";
+  const planSignals = summarizeQueryStorePlans(plansSet.rows || [], runtimeSet.rows || []);
+  const nextChecks = summarizeQueryStoreNextChecks(planSignals, waitsSet.rows || [], overview);
+  const impactTarget = overview.object_name ? objectName : "";
+  return `
+    <section class="query-store-detail">
+      <div class="map-detail-head">
+        <div>
+          <span class="map-kicker">Query Store query</span>
+          <h4>Query ${escapeHtml(payload.queryId || overview.query_id || "-")}</h4>
+        </div>
+        <span class="confidence-pill">${escapeHtml(objectName)}</span>
+      </div>
+
+      <div class="map-detail-grid">
+        <div><strong>Object</strong><span>${escapeHtml(objectName)}</span></div>
+        <div><strong>Object type</strong><span>${escapeHtml(overview.object_type || "-")}</span></div>
+        <div><strong>Last compile</strong><span>${escapeHtml(overview.last_compile_start_time || "-")}</span></div>
+        <div><strong>Last execution</strong><span>${escapeHtml(overview.last_execution_time || "-")}</span></div>
+      </div>
+
+      <div class="query-store-signals">
+        ${planSignals.map((signal) => `<span class="query-store-signal ${escapeHtml(signal.level)}">${escapeHtml(signal.text)}</span>`).join("")}
+      </div>
+
+      ${overview.object_name ? `
+        <div class="impact-action-note">
+          <strong>Resolved object</strong>
+          <span>This query is tied to ${escapeHtml(objectName)}. Process matching and impact review can use that module.</span>
+          <button type="button" class="copy-sql-button" data-query-store-impact="${escapeHtml(impactTarget)}">Analyze impact</button>
+        </div>
+      ` : `
+        <div class="impact-action-note recommendation-note">
+          <strong>No module resolved</strong>
+          <span>No procedure, view, or function was resolved from Query Store for this query. This is common with ad hoc SQL, ORM generated SQL, dynamic SQL, or statements captured outside a module; process matching may be unavailable.</span>
+        </div>
+      `}
+
+      <details class="recommendation-subsection" open>
+        <summary>Likely next checks</summary>
+        <div class="query-store-check-list">
+          ${nextChecks.map((check) => `
+            <div class="query-store-check">
+              <strong>${escapeHtml(check.title)}</strong>
+              <span>${escapeHtml(check.reason)}</span>
+            </div>
+          `).join("")}
+        </div>
+      </details>
+
+      <div class="map-fragments">
+        <strong>Full query text</strong>
+        ${renderCodeFragment({ lineNumber: null, text: overview.query_sql_text || "No query text available." })}
+      </div>
+
+      <details class="recommendation-subsection" open>
+        <summary>Runtime recent vs baseline</summary>
+        ${renderDetailResultSet(runtimeSet)}
+      </details>
+      <details class="recommendation-subsection" open>
+        <summary>Associated plans</summary>
+        ${renderDetailResultSet(plansSet)}
+      </details>
+      <details class="recommendation-subsection" open>
+        <summary>Dominant waits</summary>
+        ${renderDetailResultSet(waitsSet)}
+      </details>
+      <details class="recommendation-subsection" open>
+        <summary>Possible related processes</summary>
+        ${renderDetailResultSet(processesSet)}
+      </details>
+    </section>
+  `;
+}
+
+function bindQueryStoreDetailControls(payload) {
+  const button = els.mapDetailBody.querySelector("[data-query-store-impact]");
+  if (!button) return;
+  button.addEventListener("click", async () => {
+    const target = button.dataset.queryStoreImpact || "";
+    if (!target) return;
+    els.mapDetailDialog.close();
+    setActiveQuery("impact_analysis", "Impact Analysis");
+    await runImpactAnalysis(target);
+  });
+}
+
+function summarizeQueryStorePlans(plans, runtimeRows) {
+  const signals = [];
+  const planCount = plans.filter((plan) => plan.plan_id).length;
+  const forcedFailures = plans.reduce((total, plan) => total + Number(plan.force_failure_count || 0), 0);
+  const forcedPlans = plans.filter((plan) => Number(plan.is_forced_plan || 0) === 1).length;
+  const recent = runtimeRows.find((row) => String(row.runtime_window || "").toLowerCase() === "recent") || {};
+  const baseline = runtimeRows.find((row) => String(row.runtime_window || "").toLowerCase() === "baseline") || {};
+  const recentReads = Number(recent.avg_logical_reads || 0);
+  const baselineReads = Number(baseline.avg_logical_reads || 0);
+  if (planCount > 1) signals.push({ level: "medium", text: `${planCount} plans observed` });
+  if (forcedPlans) signals.push({ level: "low", text: `${forcedPlans} forced plan(s)` });
+  if (forcedFailures) signals.push({ level: "high", text: "Forced plan failure detected" });
+  if (recentReads > 100000 || (baselineReads && recentReads >= baselineReads * 2)) signals.push({ level: "medium", text: "High or rising logical reads" });
+  if (planCount >= 3) signals.push({ level: "medium", text: "Possible parameter sensitivity" });
+  if (!signals.length) signals.push({ level: "low", text: "No obvious plan warning" });
+  return signals;
+}
+
+function summarizeQueryStoreNextChecks(planSignals, waitRows, overview) {
+  const signalText = planSignals.map((signal) => signal.text.toLowerCase()).join(" ");
+  const waits = waitRows.map((row) => String(row.wait_category || "").toLowerCase()).join(" ");
+  const checks = [
+    {
+      title: "Review plan changes",
+      reason: signalText.includes("plans observed") || signalText.includes("forced plan")
+        ? "Multiple or forced plans are visible, so compare recent plan behavior before forcing anything."
+        : "Confirm whether the recent runtime changed because the optimizer selected a different plan.",
+    },
+    {
+      title: "Review statistics",
+      reason: "Stale or skewed statistics can explain regressions, bad estimates, and parameter-sensitive behavior.",
+    },
+    {
+      title: "Review related indexes",
+      reason: signalText.includes("logical reads")
+        ? "Logical reads are high or rising, so index shape and scan patterns deserve attention."
+        : "Validate existing indexes before adding new ones or changing maintenance strategy.",
+    },
+    {
+      title: "Review blocking and waits",
+      reason: waits
+        ? `Dominant Query Store waits include: ${waitRows.slice(0, 3).map((row) => row.wait_category || "-").join(", ")}.`
+        : "No dominant wait category was returned for the recent Query Store window.",
+    },
+    {
+      title: "Review parameter sensitivity",
+      reason: signalText.includes("parameter sensitivity")
+        ? "Several plans exist for the query, which can be a signal of parameter-sensitive behavior."
+        : "Check whether different parameter values produce very different row counts or plans.",
+    },
+  ];
+  if (!overview.object_name) {
+    checks.push({
+      title: "Resolve caller context",
+      reason: "Because Query Store did not resolve a module, use application traces, job step text, or query text matching to find the caller.",
+    });
+  }
+  return checks;
 }
 
 function getCodeObjectName(row) {
