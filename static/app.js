@@ -33,7 +33,6 @@ const OBJECT_DOCUMENTATION_GROUPS = [
     title: "Security",
     names: ["database_principals", "database_roles", "database_role_members", "database_permissions"],
   },
-  { title: "Analysis", names: ["review_findings", "index_usage", "index_physical_stats", "missing_indexes", "statistics"] },
 ];
 
 const PROCESS_GROUPS = [
@@ -82,6 +81,10 @@ const HEALTH_GROUPS = [
   {
     title: "Impact",
     names: ["impact_analysis"],
+  },
+  {
+    title: "Recommendations",
+    names: ["recommendations"],
   },
 ];
 
@@ -1182,6 +1185,10 @@ async function runActiveQuery() {
       await runImpactAnalysis();
       return;
     }
+    if (isRecommendationsQuery()) {
+      await runRecommendations();
+      return;
+    }
     const isMixedLineage = shouldUseMixedLineageQuery();
     if (isMixedLineage && !shouldUseAgentConnection()) {
       state.columns = [];
@@ -1241,7 +1248,7 @@ function clearLiveRefreshTimer() {
 
 function scheduleLiveRefresh() {
   clearLiveRefreshTimer();
-  if (!state.liveRefreshEnabled || !state.connected || state.activeArea !== "live" || !isLiveQuery()) {
+  if (!state.liveRefreshEnabled || !state.connected || state.activeArea !== "operations" || !isLiveQuery()) {
     return;
   }
   state.liveRefreshTimer = setTimeout(async () => {
@@ -1284,6 +1291,10 @@ function isReviewDashboardQuery() {
 
 function isImpactAnalysisQuery() {
   return state.activeQuery?.name === "impact_analysis";
+}
+
+function isRecommendationsQuery() {
+  return state.activeQuery?.name === "recommendations";
 }
 
 async function runHealthView() {
@@ -1802,6 +1813,175 @@ function bindImpactAnalysisControls() {
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     runImpactAnalysis(input.value);
+  });
+}
+
+async function runRecommendations() {
+  els.message.classList.add("hidden");
+  els.tableTools.classList.add("hidden");
+  els.tableWrap.classList.add("hidden");
+  els.pagination.classList.add("hidden");
+  els.exportCsv.disabled = true;
+  els.cardView.classList.remove("hidden");
+  els.cardView.innerHTML = renderRecommendationsLoading();
+  const payload = await api("/api/recommendations", {
+    method: "POST",
+    body: JSON.stringify({
+      connection: getQueryConnection(),
+      agentConnection: shouldUseAgentConnection() ? getQueryConnection(true) : null,
+    }),
+  });
+  const resultSet = payload.resultSets?.[0] || { columns: [], rows: [] };
+  state.columns = resultSet.columns || [];
+  state.rows = resultSet.rows || [];
+  els.rowCount.textContent = String(state.rows.length);
+  els.columnCount.textContent = String(state.columns.length);
+  els.exportCsv.disabled = state.rows.length === 0;
+  els.cardView.innerHTML = renderRecommendationsView(state.rows);
+  bindRecommendationControls();
+}
+
+function renderRecommendationsLoading() {
+  return `
+    <section class="process-map process-map-loading">
+      <div class="loading-state">
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <div>
+          <strong>Building recommendations</strong>
+          <span>Reviewing health findings and preparing safe suggested SQL.</span>
+        </div>
+        <div class="loading-bar" aria-hidden="true"><span></span></div>
+      </div>
+    </section>
+  `;
+}
+
+function renderRecommendationsView(rows) {
+  const grouped = rows.reduce((groups, row) => {
+    const category = getRecommendationCategory(row);
+    if (!groups[category]) groups[category] = [];
+    groups[category].push(row);
+    return groups;
+  }, {});
+  const categories = ["Jobs", "Index", "Storage", "Waits / TempDB", "Access", "Other"].filter((category) => grouped[category]?.length);
+  const highCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "high").length;
+  const mediumCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "medium").length;
+  const lowCount = rows.filter((row) => normalizeAlertSeverity(row.severity) === "low").length;
+  const overallSeverity = highCount ? "high" : mediumCount ? "medium" : lowCount ? "low" : "good";
+  return `
+    <section class="recommendations">
+      <section class="health-summary health-${escapeHtml(overallSeverity)}">
+        <div>
+          <span class="health-eyebrow">Recommendations</span>
+          <strong>${escapeHtml(formatHealthStatus(overallSeverity))}</strong>
+          <p>${escapeHtml(rows.length ? `${rows.length} recommendation(s) generated from online review findings.` : "No active recommendations were generated.")}</p>
+        </div>
+        <div class="health-summary-actions">
+          <div class="health-totals">
+            ${renderJobsHealthTotal("High", highCount, "high")}
+            ${renderJobsHealthTotal("Medium", mediumCount, "medium")}
+            ${renderJobsHealthTotal("Low", lowCount, "low")}
+          </div>
+        </div>
+      </section>
+      <div class="recommendation-note-main">
+        SQL is proposed only. SQLSidekick never executes fixes automatically.
+      </div>
+      ${categories.length ? `
+        <section class="recommendation-category-grid">
+          ${categories.map((category) => renderRecommendationCategory(category, grouped[category])).join("")}
+        </section>
+      ` : `<div class="process-map-empty"><strong>No recommendations found.</strong><span>No active review findings were returned.</span></div>`}
+    </section>
+  `;
+}
+
+function getRecommendationCategory(row) {
+  const area = String(row.recommendation_area || "Other");
+  return area.includes(" - ") ? area.split(" - ")[0] : area;
+}
+
+function renderRecommendationCategory(category, rows) {
+  const severity = getHighestAlertSeverity({ rows });
+  const topFinding = rows[0]?.finding || "No active recommendations.";
+  return `
+    <details class="recommendation-category-card health-${escapeHtml(severity)}" open>
+      <summary>
+        <span class="health-dot severity-${escapeHtml(severity)}"></span>
+        <strong>${escapeHtml(category)} (${escapeHtml(rows.length)})</strong>
+        <span>${escapeHtml(topFinding)}</span>
+      </summary>
+      ${renderRecommendationCategoryBody(rows)}
+    </details>
+  `;
+}
+
+function renderRecommendationCategoryBody(rows) {
+  const grouped = rows.reduce((groups, row) => {
+    const area = String(row.recommendation_area || "Other");
+    if (!groups[area]) groups[area] = [];
+    groups[area].push(row);
+    return groups;
+  }, {});
+  return Object.keys(grouped).map((area) => renderRecommendationArea(area, grouped[area])).join("");
+}
+
+function renderRecommendationArea(area, rows) {
+  return `
+    <details class="recommendation-subsection" open>
+      <summary>
+        <span class="node-caret" aria-hidden="true">&gt;</span>
+        <strong>${escapeHtml(area)} (${escapeHtml(rows.length)})</strong>
+      </summary>
+      <div class="impact-row-list">
+        ${rows.map((row) => renderRecommendationRow(row)).join("")}
+      </div>
+    </details>
+  `;
+}
+
+function renderRecommendationRow(row) {
+  const severity = normalizeAlertSeverity(row.severity);
+  const sql = String(row.suggested_sql || "").trim();
+  const copyValue = encodeURIComponent(sql);
+  return `
+    <article class="impact-row impact-${escapeHtml(severity)}">
+      <div class="impact-row-main">
+        <span class="impact-direction">${escapeHtml(labelize(severity))}</span>
+        <strong>${escapeHtml(row.affected_object || "-")}</strong>
+        <span>${escapeHtml(row.finding || "-")}</span>
+      </div>
+      <div class="impact-row-detail">
+        <span><strong>Evidence</strong>${escapeHtml(row.evidence || "-")}</span>
+        <span><strong>Impact</strong>${escapeHtml(row.impact_hint || "-")}</span>
+        <span><strong>Action</strong>${escapeHtml(row.recommended_action || "-")}</span>
+      </div>
+      ${sql ? `
+        <details class="impact-code">
+          <summary>Suggested SQL</summary>
+          <pre><code>${escapeHtml(sql)}</code></pre>
+          <button class="copy-sql-button" type="button" data-copy-sql="${escapeHtml(copyValue)}">Copy SQL</button>
+        </details>
+      ` : ""}
+      <div class="impact-action-note recommendation-note">
+        <strong>Safety</strong>
+        <span>${escapeHtml(row.safety_notes || "Review before applying changes.")}</span>
+      </div>
+    </article>
+  `;
+}
+
+function bindRecommendationControls() {
+  els.cardView.querySelectorAll("[data-copy-sql]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const sql = decodeURIComponent(button.dataset.copySql || "");
+      if (!sql) return;
+      await navigator.clipboard.writeText(sql);
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = "Copy SQL";
+      }, 1200);
+    });
   });
 }
 

@@ -1,16 +1,20 @@
 :root {
-  --bg: #f3f5f7;
+  --bg: #f6f8fa;
   --surface: #ffffff;
-  --surface-2: #edf3f6;
+  --surface-2: #eef3f6;
   --text: #17202a;
-  --muted: #647181;
-  --line: #d9e0e7;
+  --muted: #65717e;
+  --line: #d8e0e7;
   --brand: #176b87;
   --brand-dark: #0f5268;
   --accent: #d78931;
+  --warning: #b7791f;
   --danger: #a73434;
   --ok: #1f7a4d;
-  --shadow: 0 12px 30px rgba(30, 46, 64, 0.08);
+  --info: #3b82a0;
+  --unknown: #6b7280;
+  --shadow: 0 10px 24px rgba(23, 32, 42, 0.07);
+  --shadow-soft: 0 4px 14px rgba(23, 32, 42, 0.05);
 }
 
 * {
@@ -21,7 +25,8 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: "Segoe UI", Arial, sans-serif;
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  font-size: 14px;
 }
 
 h1,
@@ -57,15 +62,15 @@ h2 {
 
 .connection-head,
 .app-topbar {
-  min-height: 82px;
+  min-height: 78px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 18px 28px;
-  background: #10232e;
+  padding: 16px 28px;
+  background: #102631;
   color: #fff;
-  border-bottom: 4px solid var(--accent);
+  border-bottom: 3px solid var(--accent);
 }
 
 .eyebrow {
@@ -301,8 +306,8 @@ button:disabled {
 
 .object-sidebar {
   min-width: 0;
-  padding: 16px;
-  background: #fff;
+  padding: 14px;
+  background: #f8fafc;
   border-right: 1px solid var(--line);
   overflow: auto;
 }
@@ -320,16 +325,20 @@ button:disabled {
 .module-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 7px;
   margin-top: 14px;
+  padding: 4px;
+  background: #e9eff3;
+  border: 1px solid var(--line);
+  border-radius: 8px;
 }
 
 .module-tab {
-  min-height: 36px;
+  min-height: 34px;
   padding: 7px 8px;
-  background: #fff;
+  background: transparent;
   color: var(--brand);
-  border-color: var(--line);
+  border-color: transparent;
   font-size: 12px;
   font-weight: 800;
 }
@@ -339,6 +348,7 @@ button:disabled {
   background: var(--brand);
   border-color: var(--brand);
   color: #fff;
+  box-shadow: var(--shadow-soft);
 }
 
 .object-menu {
@@ -373,6 +383,7 @@ button:disabled {
   border-radius: 8px;
   background: #fff;
   overflow: hidden;
+  box-shadow: var(--shadow-soft);
 }
 
 .menu-section > summary {
@@ -382,7 +393,7 @@ button:disabled {
   justify-content: space-between;
   gap: 8px;
   padding: 11px 12px;
-  background: #edf3f6;
+  background: linear-gradient(180deg, #f5f8fa 0%, #edf3f6 100%);
   color: var(--brand-dark);
   cursor: pointer;
   font-weight: 800;
@@ -426,6 +437,7 @@ button:disabled {
 .menu-group {
   border: 1px solid var(--line);
   border-radius: 8px;
+  background: #fff;
   overflow: hidden;
 }
 
@@ -436,7 +448,7 @@ button:disabled {
   gap: 8px;
   min-height: 42px;
   padding: 10px 12px;
-  background: #f8fafc;
+  background: #f7fafc;
   color: #263542;
   cursor: pointer;
   font-weight: 700;
@@ -525,8 +537,8 @@ button:disabled {
 
 .query-item {
   width: 100%;
-  min-height: 38px;
-  padding: 9px 10px;
+  min-height: 34px;
+  padding: 8px 10px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: #fff;
@@ -542,6 +554,10 @@ button:disabled {
 .query-item.active {
   border-color: var(--brand);
   background: var(--surface-2);
+}
+
+.query-item.active {
+  box-shadow: inset 3px 0 0 var(--brand);
 }
 
 .query-item.failed {
@@ -589,7 +605,7 @@ button:disabled {
 }
 
 .workspace-head {
-  padding: 18px 20px;
+  padding: 16px 22px;
   background: #fff;
   border-bottom: 1px solid var(--line);
 }
@@ -604,8 +620,8 @@ button:disabled {
 }
 
 .tool-button {
-  width: 52px;
-  min-height: 42px;
+  width: 46px;
+  min-height: 38px;
   padding: 0;
   display: inline-grid;
   place-items: center;
@@ -805,7 +821,7 @@ button:disabled {
 
 .detail-surface {
   min-height: 0;
-  padding: 16px 20px 20px;
+  padding: 14px 20px 20px;
 }
 
 .table-tools {
@@ -841,6 +857,7 @@ button:disabled {
   background: #fff;
   border: 1px solid var(--line);
   border-radius: 8px;
+  box-shadow: var(--shadow-soft);
 }
 
 .pagination {
@@ -1034,6 +1051,98 @@ button:disabled {
   gap: 14px;
 }
 
+.recommendations {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 14px;
+}
+
+.recommendation-note-main {
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--brand);
+  border-radius: 8px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.recommendation-category-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.recommendation-category-card {
+  min-width: 0;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--brand);
+  border-radius: 8px;
+  box-shadow: var(--shadow-soft);
+}
+
+.recommendation-category-card.health-high {
+  border-left-color: var(--danger);
+}
+
+.recommendation-category-card.health-medium {
+  border-left-color: var(--warning);
+}
+
+.recommendation-category-card.health-low {
+  border-left-color: var(--info);
+}
+
+.recommendation-category-card summary {
+  min-height: 86px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  align-items: center;
+  padding: 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.recommendation-category-card summary::-webkit-details-marker,
+.recommendation-subsection summary::-webkit-details-marker {
+  display: none;
+}
+
+.recommendation-category-card summary strong {
+  color: var(--text);
+  font-size: 18px;
+}
+
+.recommendation-category-card summary span:last-child {
+  grid-column: 2;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.recommendation-subsection {
+  margin: 0 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.recommendation-subsection summary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.recommendation-subsection[open] summary .node-caret {
+  transform: rotate(90deg);
+}
+
 .impact-search-panel,
 .impact-summary,
 .impact-action-note,
@@ -1151,6 +1260,11 @@ button:disabled {
   color: var(--brand-dark);
 }
 
+.recommendation-note {
+  padding: 10px 12px;
+  background: #fbfcfd;
+}
+
 .impact-section {
   overflow: hidden;
 }
@@ -1192,15 +1306,15 @@ button:disabled {
 }
 
 .impact-row.impact-high {
-  border-left-color: #b13b3b;
+  border-left-color: var(--danger);
 }
 
 .impact-row.impact-medium {
-  border-left-color: #df922b;
+  border-left-color: var(--warning);
 }
 
 .impact-row.impact-low {
-  border-left-color: #16803a;
+  border-left-color: var(--info);
 }
 
 .impact-row-main {
@@ -1285,6 +1399,17 @@ button:disabled {
   white-space: pre-wrap;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.copy-sql-button {
+  margin: 0 12px 12px;
+  min-height: 32px;
+  padding: 6px 10px;
+  background: #fff;
+  color: var(--brand);
+  border-color: var(--line);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .confidence-pill {
@@ -2166,18 +2291,19 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 18px;
   align-items: center;
-  padding: 18px;
+  padding: 16px 18px;
   background: #fff;
   border: 1px solid var(--line);
   border-left: 4px solid var(--brand);
   border-radius: 8px;
+  box-shadow: var(--shadow-soft);
 }
 
 .health-summary strong {
   display: block;
   margin-top: 6px;
   color: var(--text);
-  font-size: 28px;
+  font-size: 26px;
   line-height: 1.1;
 }
 
@@ -2195,23 +2321,23 @@ button:disabled {
 }
 
 .health-high {
-  border-left-color: #b43a3a;
+  border-left-color: var(--danger);
 }
 
 .health-medium {
-  border-left-color: #d98b1f;
+  border-left-color: var(--warning);
 }
 
 .health-low {
-  border-left-color: #1b7590;
+  border-left-color: var(--info);
 }
 
 .health-good {
-  border-left-color: #22965a;
+  border-left-color: var(--ok);
 }
 
 .health-unknown {
-  border-left-color: #64748b;
+  border-left-color: var(--unknown);
 }
 
 .health-totals {
@@ -2247,7 +2373,7 @@ button:disabled {
 
 .health-total {
   min-width: 84px;
-  padding: 14px 16px;
+  padding: 12px 15px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-2);
@@ -2261,30 +2387,30 @@ button:disabled {
 }
 
 .health-total.severity-high {
-  background: #fff0f0;
-  border-color: #efb7b7;
+  background: #fff1f1;
+  border-color: #e7b5b5;
 }
 
 .health-total.severity-high strong {
-  color: #a43131;
+  color: var(--danger);
 }
 
 .health-total.severity-medium {
-  background: #fff7e8;
-  border-color: #f4d59b;
+  background: #fff8ec;
+  border-color: #e9cf9f;
 }
 
 .health-total.severity-medium strong {
-  color: #9a5f00;
+  color: var(--warning);
 }
 
 .health-total.severity-low {
-  background: #eef7fb;
-  border-color: #b9dce8;
+  background: #eef7fa;
+  border-color: #b7d9e5;
 }
 
 .health-total.severity-low strong {
-  color: #176b86;
+  color: var(--info);
 }
 
 .health-total:hover,
@@ -2296,19 +2422,20 @@ button:disabled {
 .health-category-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(190px, 1fr));
-  gap: 14px;
+  gap: 12px;
 }
 
 .health-category-card {
   display: block;
   width: 100%;
-  padding: 14px;
+  padding: 13px 14px;
   background: #fff;
   border: 1px solid var(--line);
   border-left: 4px solid var(--brand);
   border-radius: 8px;
   text-align: left;
   cursor: pointer;
+  box-shadow: var(--shadow-soft);
 }
 
 .health-card-head {
@@ -2331,18 +2458,18 @@ button:disabled {
 }
 
 .health-dot.severity-high {
-  background: #b43a3a;
-  box-shadow: 0 0 0 4px rgba(180, 58, 58, 0.13);
+  background: var(--danger);
+  box-shadow: 0 0 0 4px rgba(167, 52, 52, 0.13);
 }
 
 .health-dot.severity-medium {
-  background: #d98b1f;
-  box-shadow: 0 0 0 4px rgba(217, 139, 31, 0.15);
+  background: var(--warning);
+  box-shadow: 0 0 0 4px rgba(183, 121, 31, 0.15);
 }
 
 .health-dot.severity-low {
-  background: #1b7590;
-  box-shadow: 0 0 0 4px rgba(27, 117, 144, 0.13);
+  background: var(--info);
+  box-shadow: 0 0 0 4px rgba(59, 130, 160, 0.13);
 }
 
 .health-category-card.health-unknown .health-dot,
@@ -2361,23 +2488,24 @@ button:disabled {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 thead th {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: #edf2f6;
+  background: #eef3f6;
   color: #263542;
   text-align: left;
   border-bottom: 1px solid var(--line);
+  font-weight: 800;
 }
 
 th,
 td {
   max-width: 380px;
-  padding: 9px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
   overflow-wrap: anywhere;

@@ -113,6 +113,9 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/impact-analysis":
             self.handle_impact_analysis()
             return
+        if parsed.path == "/api/recommendations":
+            self.handle_recommendations()
+            return
         self.send_json({"error": "Ruta no encontrada."}, status=404)
 
     def handle_run_query(self) -> None:
@@ -280,6 +283,65 @@ class SQLSidekickHandler(BaseHTTPRequestHandler):
                     ],
                 }
             )
+        except SQLServerError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": f"Error inesperado: {exc}"}, status=500)
+
+    def handle_recommendations(self) -> None:
+        payload = self.read_json()
+        rows: list[dict[str, Any]] = []
+        errors: list[str] = []
+        try:
+            primary_settings = ConnectionSettings.from_payload(payload.get("connection", payload))
+            agent_payload = payload.get("agentConnection")
+            agent_settings = ConnectionSettings.from_payload(agent_payload) if agent_payload else None
+            queries = load_named_queries(self.queries_path, version="full")
+
+            sources = [
+                ("Jobs", "jobs_health_dashboard", agent_settings),
+                ("Index", "index_health_dashboard", primary_settings),
+                ("Storage", "storage_datafiles_health", primary_settings),
+                ("Waits / TempDB", "waits_tempdb_review", primary_settings),
+            ]
+            for source_area, query_name, settings in sources:
+                if settings is None:
+                    errors.append(f"{source_area}: SQL Agent credentials are not configured.")
+                    continue
+                try:
+                    result = execute_query(settings, queries[query_name].sql)
+                    findings = result.get("resultSets", [{}])[0].get("rows", [])
+                    rows.extend(build_recommendation_rows(source_area, findings))
+                except Exception as exc:
+                    errors.append(f"{source_area}: {exc}")
+
+            for error in errors:
+                rows.append(
+                    {
+                        "severity": "LOW",
+                        "recommendation_area": "Access",
+                        "finding": "Recommendation source could not be evaluated",
+                        "affected_object": error,
+                        "evidence": "The app could not read one recommendation source.",
+                        "impact_hint": "Recommendations may be incomplete.",
+                        "recommended_action": "Review credentials and permissions for this source.",
+                        "suggested_sql": "-- No fix SQL generated.\n-- Configure the required review credentials and rerun Recommendations.",
+                        "safety_notes": "No SQL was generated because the source could not be evaluated.",
+                    }
+                )
+
+            columns = [
+                "severity",
+                "recommendation_area",
+                "finding",
+                "affected_object",
+                "evidence",
+                "impact_hint",
+                "recommended_action",
+                "suggested_sql",
+                "safety_notes",
+            ]
+            self.send_json({"ok": True, "resultSets": [{"columns": columns, "rows": rows}]})
         except SQLServerError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
@@ -1041,6 +1103,157 @@ def summarize_impact(search_text: str, rows: list[dict[str, Any]], job_error: st
         "reason": f"{search_text}: " + (", ".join(reasons) if reasons else "no known impact found with visible metadata."),
         "suggested_action": "Review affected objects and related jobs before changing this object. Treat Low confidence rows as incomplete metadata, not as safe.",
     }
+
+
+def build_recommendation_rows(source_area: str, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [build_recommendation_row(source_area, finding) for finding in findings if finding]
+
+
+def build_recommendation_row(source_area: str, finding: dict[str, Any]) -> dict[str, Any]:
+    severity = str(finding.get("severity") or "LOW").upper()
+    health_area = str(finding.get("health_area") or source_area)
+    check_name = str(finding.get("check_name") or "Review finding")
+    affected_object = str(
+        finding.get("job_name")
+        or finding.get("subject_name")
+        or finding.get("object_name")
+        or finding.get("database_name")
+        or "-"
+    )
+    detail = str(finding.get("detail") or finding.get("recommendation") or "-")
+    suggested_sql = recommendation_sql(source_area, finding)
+    if not suggested_sql:
+        suggested_sql = "-- No safe generic SQL is available for this finding.\n-- Review the evidence and validate the change manually."
+    return {
+        "severity": severity,
+        "recommendation_area": f"{source_area} - {health_area}",
+        "finding": check_name,
+        "affected_object": affected_object,
+        "evidence": detail,
+        "impact_hint": recommendation_impact_hint(source_area),
+        "recommended_action": str(finding.get("recommendation") or default_recommended_action(source_area)),
+        "suggested_sql": suggested_sql,
+        "safety_notes": recommendation_safety_notes(source_area, suggested_sql),
+    }
+
+
+def recommendation_sql(source_area: str, finding: dict[str, Any]) -> str:
+    check = str(finding.get("check_name") or "").lower()
+    area = str(finding.get("health_area") or "").lower()
+    job_name = str(finding.get("job_name") or "")
+    subject = str(finding.get("subject_name") or "")
+    index_name = str(finding.get("index_name") or "")
+
+    if source_area == "Jobs":
+        if "failed" in check or "canceled" in check:
+            return f"EXEC msdb.dbo.sp_help_jobhistory @job_name = N'{tsql_escape(job_name)}';"
+        if "owner" in check and job_name:
+            return (
+                f"EXEC msdb.dbo.sp_update_job\n"
+                f"    @job_name = N'{tsql_escape(job_name)}',\n"
+                f"    @owner_login_name = N'<controlled_service_login>';"
+            )
+        if "schedule" in check:
+            return f"EXEC msdb.dbo.sp_help_jobschedule @job_name = N'{tsql_escape(job_name)}';"
+        if "disabled" in check:
+            return f"EXEC msdb.dbo.sp_update_job @job_name = N'{tsql_escape(job_name)}', @enabled = 1;"
+        return f"EXEC msdb.dbo.sp_help_job @job_name = N'{tsql_escape(job_name)}';" if job_name else ""
+
+    if source_area == "Index":
+        if "missing" in area:
+            return (
+                f"-- Review existing indexes and workload before creating anything.\n"
+                f"-- Candidate object: {subject}\n"
+                f"-- Use equality/inequality/include columns from Evidence to draft a CREATE INDEX statement."
+            )
+        if "unused" in area and subject and index_name:
+            return (
+                f"-- Validate with a longer observation window before dropping.\n"
+                f"-- DROP INDEX [{tsql_bracket_escape(index_name)}] ON {subject};"
+            )
+        if "disabled" in area and subject and index_name:
+            return f"ALTER INDEX [{tsql_bracket_escape(index_name)}] ON {subject} REBUILD;"
+        if "hypothetical" in area and subject and index_name:
+            return f"DROP INDEX [{tsql_bracket_escape(index_name)}] ON {subject};"
+        if "heap" in area:
+            return f"-- Review clustered index design for {subject} before creating one."
+        return f"UPDATE STATISTICS {subject};" if subject else ""
+
+    if source_area == "Storage":
+        if "autogrowth" in area and subject:
+            return (
+                "ALTER DATABASE [<database_name>]\n"
+                f"MODIFY FILE (NAME = N'{tsql_escape(subject)}', FILEGROWTH = 1024MB);"
+            )
+        if "space usage" in area and subject:
+            return (
+                "-- Check current file size, used space, growth setting, and max size first.\n"
+                "SELECT\n"
+                "    name,\n"
+                "    type_desc,\n"
+                "    size / 131072.0 AS size_gb,\n"
+                "    FILEPROPERTY(name, 'SpaceUsed') / 131072.0 AS used_gb,\n"
+                "    is_percent_growth,\n"
+                "    growth,\n"
+                "    max_size\n"
+                "FROM sys.database_files\n"
+                f"WHERE name = N'{tsql_escape(subject)}';\n\n"
+                "-- Optional pre-grow only after validating disk capacity and maintenance window.\n"
+                "-- ALTER DATABASE [<database_name>]\n"
+                f"-- MODIFY FILE (NAME = N'{tsql_escape(subject)}', SIZE = <new_size_GB>GB);"
+            )
+        if "log usage" in area:
+            return "SELECT name, log_reuse_wait_desc FROM sys.databases WHERE database_id = DB_ID();"
+        return ""
+
+    if source_area == "Waits / TempDB":
+        if "blocking" in area:
+            return "SELECT * FROM sys.dm_exec_requests WHERE blocking_session_id <> 0;"
+        if "tempdb" in area:
+            return (
+                "SELECT session_id,\n"
+                "       (user_objects_alloc_page_count + internal_objects_alloc_page_count\n"
+                "        - user_objects_dealloc_page_count - internal_objects_dealloc_page_count) / 128.0 AS net_tempdb_mb\n"
+                "FROM sys.dm_db_session_space_usage\n"
+                "ORDER BY net_tempdb_mb DESC;"
+            )
+        return "SELECT session_id, status, wait_type, wait_time, blocking_session_id FROM sys.dm_exec_requests WHERE session_id <> @@SPID;"
+
+    return ""
+
+
+def recommendation_impact_hint(source_area: str) -> str:
+    hints = {
+        "Jobs": "Operational process may fail, skip a scheduled load, or run under an unsafe owner.",
+        "Index": "Index changes can improve reads but may add write overhead, blocking, or maintenance cost.",
+        "Storage": "Storage changes can affect growth behavior, disk pressure, and transaction log availability.",
+        "Waits / TempDB": "Current activity can affect users now; review live sessions before acting.",
+    }
+    return hints.get(source_area, "Review impact before applying changes.")
+
+
+def default_recommended_action(source_area: str) -> str:
+    return f"Review the {source_area} finding and validate impact before changing SQL Server."
+
+
+def recommendation_safety_notes(source_area: str, suggested_sql: str) -> str:
+    if not suggested_sql:
+        return "No generic SQL is safe enough for this finding; review manually."
+    notes = {
+        "Index": "Do not run blindly. Check workload, blocking risk, edition support, and maintenance window.",
+        "Jobs": "Validate owner, schedule, and failing step first. Suggested SQL is diagnostic or administrative.",
+        "Storage": "Replace placeholders, confirm disk capacity, and avoid growth changes during peak load.",
+        "Waits / TempDB": "Diagnostic SQL only. Do not kill sessions without confirming business impact.",
+    }
+    return notes.get(source_area, "Suggested SQL is a starting point, not an automatic fix.")
+
+
+def tsql_escape(value: str) -> str:
+    return str(value or "").replace("'", "''")
+
+
+def tsql_bracket_escape(value: str) -> str:
+    return str(value or "").replace("]", "]]")
 
 
 def lineage_from_process_objects_sql(query_name: str, rows: list[dict[str, Any]]) -> str:

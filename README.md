@@ -9,7 +9,7 @@ La version actual se enfoca en:
 - Documentacion de Jobs basada en SQL Agent.
 - Lineage basico online para jobs, procedures, views y functions.
 - Live dashboard/checks para revisar actividad actual sin persistencia.
-- Health dashboard basico con alertas consolidadas y Jobs Health accionable.
+- Operations Review con Health, Jobs/Index/Storage/Waits reviews, Impact Analysis y Recommendations.
 - Impact Analysis online para revisar riesgo antes de cambiar objetos.
 - Mapas visuales de dependencias sin guardar snapshots ni historial local.
 
@@ -44,7 +44,7 @@ http://127.0.0.1:8765
 - **Documentation**: documentacion basica de objetos SQL Server.
 - **Processes**: mapas visuales de lineage para jobs, procedures, views y functions.
 - **Live**: diagnostico online de actividad actual, bloqueos, waits, TempDB y log.
-- **Operations > Review**: dashboards de Health, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review e Impact Analysis.
+- **Operations > Review**: Health dashboard, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review, Impact Analysis y Recommendations.
 
 ## Processes
 
@@ -99,6 +99,7 @@ Dentro de **Operations > Review**, Health consolida alertas basicas y revisiones
 - **Storage / Datafiles health**: uso de archivos, autogrowth, log usage y layout de datafiles.
 - **Waits / TempDB review**: bloqueos, waits activos, requests largos, uso de TempDB y presion del log.
 - **Impact analysis**: riesgo antes de cambiar tablas, columnas, procedures, views o functions.
+- **Recommendations**: acciones recomendadas con evidencia, impacto, SQL sugerido y notas de seguridad.
 
 Jobs Health revisa:
 
@@ -123,6 +124,20 @@ Impact Analysis responde "si cambio esto, que se afecta?" usando metadata visibl
 - nivel de riesgo y confianza.
 
 No ejecuta cambios ni fixes. La salida es una guia de revision previa al cambio.
+
+## Recommendations
+
+Recommendations convierte findings online en acciones revisables:
+
+- evidencia,
+- severidad,
+- objeto afectado,
+- impacto o riesgo conocido,
+- accion recomendada,
+- SQL sugerido,
+- notas de seguridad.
+
+El SQL sugerido es una ayuda para revision. SQLSidekick no lo ejecuta automaticamente.
 
 ## Seguridad
 

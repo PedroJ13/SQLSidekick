@@ -17,7 +17,7 @@ El foco del producto es explicar:
 
 ## Estado actual
 
-La app ya cuenta con una base funcional para documentacion, lineage online, diagnostico Live y Health basico.
+La app ya cuenta con una base funcional para documentacion, lineage online, diagnostico Live y Operations Review.
 
 Componentes principales:
 
@@ -33,7 +33,7 @@ Modulos actuales:
 - **Documentation**: servidor, database, storage, structure, constraints, SQL code, security y SQL Agent jobs.
 - **Processes**: lineage maps visuales para Jobs, Procedures, Views y Functions.
 - **Live**: dashboard/checks online para actividad actual, bloqueos, waits, TempDB y log.
-- **Operations > Review**: Health dashboard, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review e Impact Analysis.
+- **Operations > Review**: Health dashboard, Jobs Health, Index Health, Storage/Datafiles Health, Waits/TempDB Review, Impact Analysis y Recommendations.
 
 ## Estado funcional por modulo
 
@@ -112,7 +112,7 @@ Settings incluye auto-refresh opcional para refrescar la consulta Live activa ca
 
 ### Health
 
-Estado: Operations > Review listo hasta Impact Analysis MVP.
+Estado: Operations > Review listo como modulo principal de accion inicial.
 
 Incluye:
 
@@ -125,6 +125,7 @@ Incluye:
 - **Storage / Datafiles Health**: revision online de uso de archivos, autogrowth, log usage y layout.
 - **Waits / TempDB Review**: revision online de bloqueos, waits, requests largos, TempDB y log pressure.
 - **Impact Analysis**: analisis online de riesgo antes de cambiar tablas, columnas, procedures, views o functions.
+- **Recommendations**: recomendaciones con evidencia, severidad, objeto afectado, SQL sugerido y notas de seguridad.
 
 Jobs Health revisa:
 
@@ -211,7 +212,22 @@ Siguientes mejoras:
 - Marcar objetos externos o cross-database con mayor claridad.
 - Enlazar findings hacia detalles de Documentation y mapas de Processes.
 
-### P3 - Query Store Intelligence
+### P3 - Recommendations / Suggested SQL
+
+Estado: MVP inicial implementado.
+
+- Consolidar findings de Jobs, Index, Storage y Waits/TempDB.
+- Mostrar evidencia, severidad, objeto afectado, SQL sugerido y notas de seguridad.
+- Mantener el SQL como propuesta revisable, nunca ejecucion automatica.
+
+Siguientes mejoras:
+
+- Enlazar cada recomendacion con Impact Analysis.
+- Exportar recomendacion completa.
+- Marcar pre-requisitos por edicion/permisos.
+- Diferenciar SQL diagnostico vs SQL de cambio.
+
+### P4 - Query Store Intelligence
 
 Objetivo:
 
@@ -225,7 +241,7 @@ MVP:
 - Relacion con objeto/proceso cuando sea posible.
 - Resumen humano de causa probable y siguiente accion.
 
-### P4 - Version enterprise / historico
+### P5 - Version enterprise / historico
 
 Queda para una version posterior:
 
@@ -250,6 +266,8 @@ El MVP actual es valioso si responde:
 - Que configuraciones basicas parecen riesgosas?
 - Que puede estar lento ahora mismo?
 - Que jobs requieren atencion primero?
+- Que accion segura podria revisar para un finding?
+- Que riesgo tiene aplicar una recomendacion?
 
 ## Riesgos
 
